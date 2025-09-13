@@ -1,0 +1,7 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+.icon { width: 20px; height: 20px; display: inline-block; }
+.icon-lg { width: 48px; height: 48px; }
+
