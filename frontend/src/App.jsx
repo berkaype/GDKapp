@@ -127,41 +127,44 @@ export default function App() {
     <div className="min-h-screen bg-gray-100">
       <header className="bg-white shadow-sm border-b">
         <div className="px-6 py-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-4">
+          <div className="flex flex-wrap items-center gap-4">
+            <div className="flex items-center gap-4">
               <h1 className="text-2xl font-bold text-gray-900">Büfe Yönetim Sistemi</h1>
               {currentPage !== 'pos' && (
-                <button onClick={() => setCurrentPage('pos')} className="flex items-center text-blue-600 hover:text-blue-800">
-                  <ChevronLeft className="h-4 w-4 mr-1" /> Ana Sayfa
+                <button
+                  onClick={() => setCurrentPage('pos')}
+                  className="flex items-center text-blue-600 hover:text-blue-800"
+                >
+                  <ChevronLeft className="h-4 w-4 mr-1" /> POS'a Dön
                 </button>
               )}
             </div>
-            <div className="flex items-center space-x-4">
+            <div className="flex flex-wrap items-center gap-4 ml-auto justify-end text-right">
               <div className="text-right">
                 <div className="text-sm text-gray-600">Günlük Ciro</div>
                 <div className="text-lg font-bold text-green-600">{formatCurrency(dailyRevenue)}</div>
-                <button
-                  onClick={async () => {
-                    try {
-                      const response = await fetch(`${API_BASE}/end-of-day`, {
-                        method: 'POST',
-                        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
-                      });
-                      if (response.ok) {
-                        window.dispatchEvent(new CustomEvent('refresh-daily-revenue'));
-                        alert('Günsonu alındı');
-                      } else {
-                        alert('Günsonu alınmadı');
-                      }
-                    } catch (error) {
+              </div>
+              <button
+                onClick={async () => {
+                  try {
+                    const response = await fetch(`${API_BASE}/end-of-day`, {
+                      method: 'POST',
+                      headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+                    });
+                    if (response.ok) {
+                      window.dispatchEvent(new CustomEvent('refresh-daily-revenue'));
+                      alert('Günsonu alındı');
+                    } else {
                       alert('Günsonu alınmadı');
                     }
-                  }}
-                  className="mt-2 px-3 py-2 bg-red-600 hover:bg-red-700 text-white rounded mr-2"
-                >
-                  Günsonu Al
-                </button>
-              </div>
+                  } catch (error) {
+                    alert('Günsonu alınmadı');
+                  }
+                }}
+                className="px-3 py-2 bg-red-600 hover:bg-red-700 text-white rounded"
+              >
+                Günsonu Al
+              </button>
               {isAuthenticated && (
                 <button onClick={handleLogout} className="flex items-center text-red-600">
                   <LogOut className="h-4 w-4 mr-1" /> Çıkış

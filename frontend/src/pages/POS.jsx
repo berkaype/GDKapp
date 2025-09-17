@@ -13,13 +13,101 @@ export default function POS({ onAdminClick, onOrderClosed }) {
   const [showPayment, setShowPayment] = useState(false);
   const [customProduct, setCustomProduct] = useState({ name: '', price: '' });
   const [showCustomProduct, setShowCustomProduct] = useState(false);
+  const [positionsLocked, setPositionsLocked] = useState(true);
+  const [productOrder, setProductOrder] = useState({});
   const paymentInputRef = useRef(null);
+
+  const getProductKey = (product) => {
+    const category = product?.category || 'Diğer';
+    const identifier = product?.id ?? product?.product_name ?? '';
+    return category + '::' + identifier;
+  };
+
+  const drinkCategoryTokens = ['icecek', 'içecek', 'icecekler', 'içecekler'];
 
   useEffect(() => {
     fetchActiveOrders();
     fetchProducts();
   }, []);
 
+  useEffect(() => {
+    try {
+      const storedLock = localStorage.getItem('posPositionsLocked');
+      if (storedLock !== null) {
+        setPositionsLocked(JSON.parse(storedLock));
+      }
+      const storedOrder = localStorage.getItem('posProductOrder');
+      if (storedOrder) {
+        setProductOrder(JSON.parse(storedOrder));
+      }
+    } catch (error) {
+      console.error(error);
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('posPositionsLocked', JSON.stringify(positionsLocked));
+    } catch (error) {
+      console.error(error);
+    }
+  }, [positionsLocked]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('posProductOrder', JSON.stringify(productOrder));
+    } catch (error) {
+      console.error(error);
+    }
+  }, [productOrder]);
+
+  useEffect(() => {
+    if (!products.length) {
+      return;
+    }
+    const groups = products.reduce((acc, product) => {
+      const category = product.category || 'Diğer';
+      if (!acc[category]) {
+        acc[category] = [];
+      }
+      acc[category].push(product);
+      return acc;
+    }, {});
+
+    setProductOrder((prev) => {
+      const next = { ...prev };
+      let changed = false;
+
+      Object.entries(groups).forEach(([category, list]) => {
+        const ids = list.map((item) => getProductKey(item));
+        const existing = next[category];
+        if (!existing) {
+          next[category] = ids;
+          changed = true;
+          return;
+        }
+        const filtered = existing.filter((id) => ids.includes(id));
+        ids.forEach((id) => {
+          if (!filtered.includes(id)) {
+            filtered.push(id);
+          }
+        });
+        if (filtered.length !== existing.length || filtered.some((id, index) => id !== existing[index])) {
+          next[category] = filtered;
+          changed = true;
+        }
+      });
+
+      Object.keys(next).forEach((category) => {
+        if (!groups[category]) {
+          delete next[category];
+          changed = true;
+        }
+      });
+
+      return changed ? next : prev;
+    });
+  }, [products]);
   const fetchActiveOrders = async () => {
     try {
       const r = await fetch(`${API_BASE}/orders?status=open`);
@@ -277,10 +365,130 @@ export default function POS({ onAdminClick, onOrderClosed }) {
     }
   }, [showPayment, paymentAmount]);
 
+  const isDrinkCategory = (category) => {
+    if (!category) return false;
+    const normalized = category.toLocaleLowerCase('tr-TR');
+    return drinkCategoryTokens.some((token) => normalized.includes(token));
+  };
+
+  const getOrderedProducts = (category, list) => {
+    const order = productOrder[category];
+    if (!order || !Array.isArray(order) || !order.length) {
+      return [...list];
+    }
+    const map = new Map(list.map((item) => [getProductKey(item), item]));
+    const ordered = [];
+    order.forEach((id) => {
+      const item = map.get(id);
+      if (item) {
+        ordered.push(item);
+        map.delete(id);
+      }
+    });
+    map.forEach((item) => ordered.push(item));
+    return ordered;
+  };
+
+  const handleMoveProduct = (category, orderedKeys, productKey, direction) => {
+    setProductOrder((prev) => {
+      const existing = prev[category] ? prev[category].filter((id) => orderedKeys.includes(id)) : [...orderedKeys];
+      orderedKeys.forEach((id) => {
+        if (!existing.includes(id)) {
+          existing.push(id);
+        }
+      });
+      const index = existing.indexOf(productKey);
+      if (index === -1) {
+        return prev;
+      }
+      const newIndex = index + direction;
+      if (newIndex < 0 || newIndex >= existing.length) {
+        return prev;
+      }
+      const updated = existing.slice();
+      const temp = updated[index];
+      updated[index] = updated[newIndex];
+      updated[newIndex] = temp;
+      return { ...prev, [category]: updated };
+    });
+  };
+
+  const togglePositionLock = () => {
+    setPositionsLocked((prev) => !prev);
+  };
+
+
+  const renderCategory = (category, list, isDrink) => {
+    const orderedList = getOrderedProducts(category, list);
+    const orderedKeys = orderedList.map((product) => getProductKey(product));
+    const gridClasses = isDrink
+      ? 'grid grid-cols-1 sm:grid-cols-2 gap-3'
+      : 'grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3';
+    return (
+      <div key={category}>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-lg font-semibold">{category}</h3>
+          {!positionsLocked && (
+            <span className="text-xs text-gray-500">Sıralamak için okları kullanın</span>
+          )}
+        </div>
+        <div className={gridClasses}>
+          {orderedList.map((product, index) => {
+            const productKey = orderedKeys[index];
+            return (
+              <div key={productKey} className="relative">
+                <button
+                  onClick={() => addProductToOrder(product)}
+                  className="w-full p-4 bg-blue-100 hover:bg-blue-200 rounded-lg text-center h-full flex flex-col justify-between"
+                >
+                  <div className="font-medium text-sm mb-1">{product.product_name}</div>
+                  <div className="text-blue-600 font-semibold">{formatCurrency(product.price)}</div>
+                </button>
+                {!positionsLocked && (
+                  <div className="absolute top-2 right-2 flex flex-col rounded bg-white/90 shadow">
+                    <button
+                      type="button"
+                      className="text-xs px-1 py-0.5 hover:text-blue-600"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleMoveProduct(category, orderedKeys, productKey, -1);
+                      }}
+                    >
+                      ▲
+                    </button>
+                    <button
+                      type="button"
+                      className="text-xs px-1 py-0.5 hover:text-blue-600"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        handleMoveProduct(category, orderedKeys, productKey, 1);
+                      }}
+                    >
+                      ▼
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
   const grouped = products.reduce((acc, product) => {
-    (acc[product.category] ||= []).push(product);
+    const category = product.category || 'Diğer';
+    if (!acc[category]) {
+      acc[category] = [];
+    }
+    acc[category].push(product);
     return acc;
   }, {});
+  const groupedEntries = Object.entries(grouped);
+  const foodGroups = groupedEntries.filter(([category]) => !isDrinkCategory(category));
+  const drinkGroups = groupedEntries.filter(([category]) => isDrinkCategory(category));
+  const layoutClass = drinkGroups.length ? 'flex flex-col lg:flex-row gap-6' : 'flex flex-col gap-6';
+  const foodColumnClass = drinkGroups.length ? 'space-y-6 lg:w-2/3' : 'space-y-6 w-full';
 
   const change = paymentAmount ? parseFloat(paymentAmount) - (currentOrder?.total_amount || 0) : 0;
   const tables = [1, 2, 3, 4, 5, 6, 7, 8];
@@ -356,7 +564,13 @@ export default function POS({ onAdminClick, onOrderClosed }) {
                   ? `Masa ${currentOrder.table_number}`
                   : `Paket #${currentOrder.takeaway_seq ?? currentOrder.id}`}
               </h2>
-              <div className="flex gap-2">
+              <div className="flex gap-2 flex-wrap">
+                <button
+                  onClick={togglePositionLock}
+                  className={`px-4 py-2 rounded-lg border ${positionsLocked ? 'border-gray-300 text-gray-600' : 'border-blue-500 text-blue-600 bg-blue-50'}`}
+                >
+                  {positionsLocked ? 'Pozisyon Kilidini Aç' : 'Pozisyon Kilidini Kilitle'}
+                </button>
                 <button
                   onClick={() => setShowCustomProduct(true)}
                   className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700"
@@ -372,31 +586,22 @@ export default function POS({ onAdminClick, onOrderClosed }) {
               </div>
             </div>
             <div className="space-y-6">
-              {Object.entries(grouped).map(([category, list]) => (
-                <div key={category}>
-                  <h3 className="text-lg font-semibold mb-3">{category}</h3>
-                  <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
-                    {list
-                      .slice()
-                      .sort((a, b) => (a.price ?? 0) - (b.price ?? 0))
-                      .map((p) => (
-                        <button
-                          key={p.id}
-                          onClick={() => addProductToOrder(p)}
-                          className="p-4 bg-blue-100 hover:bg-blue-200 rounded-lg text-center"
-                        >
-                          <div className="font-medium text-sm mb-1">{p.product_name}</div>
-                          <div className="text-blue-600 font-semibold">{formatCurrency(p.price)}</div>
-                        </button>
-                      ))}
-                  </div>
+              <div className={layoutClass}>
+                <div className={foodColumnClass}>
+                  {foodGroups.length > 0
+                    ? foodGroups.map(([category, list]) => renderCategory(category, list, false))
+                    : <div className="text-sm text-gray-500">Gösterilecek ürün bulunamadı.</div>}
                 </div>
-              ))}
+                {drinkGroups.length > 0 && (
+                  <div className="space-y-6 lg:w-1/3">
+                    {drinkGroups.map(([category, list]) => renderCategory(category, list, true))}
+                  </div>
+                )}
+              </div>
             </div>
           </div>
         )}
       </div>
-
       {currentOrder && (
         <div className="w-80 bg-white shadow-lg">
           <div className="p-4 border-b">
