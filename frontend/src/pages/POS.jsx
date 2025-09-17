@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Settings, ShoppingCart } from 'lucide-react';
 import { formatCurrency } from '../utils/format.js';
 import { getApiBase } from '../utils/api.js';
@@ -15,6 +15,9 @@ export default function POS({ onAdminClick, onOrderClosed }) {
   const [showCustomProduct, setShowCustomProduct] = useState(false);
   const [positionsLocked, setPositionsLocked] = useState(true);
   const [productOrder, setProductOrder] = useState({});
+  const [categoryOrder, setCategoryOrder] = useState([]);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedItems, setSelectedItems] = useState({});
   const paymentInputRef = useRef(null);
 
   const getProductKey = (product) => {
@@ -40,6 +43,10 @@ export default function POS({ onAdminClick, onOrderClosed }) {
       if (storedOrder) {
         setProductOrder(JSON.parse(storedOrder));
       }
+      const storedCategories = localStorage.getItem('posCategoryOrder');
+      if (storedCategories) {
+        setCategoryOrder(JSON.parse(storedCategories));
+      }
     } catch (error) {
       console.error(error);
     }
@@ -61,8 +68,57 @@ export default function POS({ onAdminClick, onOrderClosed }) {
     }
   }, [productOrder]);
 
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('posCategoryOrder', JSON.stringify(categoryOrder));
+    } catch (error) {
+      console.error(error);
+    }
+  }, [categoryOrder]);
+
+  useEffect(() => {
+    if (!selectionMode) {
+      return;
+    }
+    if (!currentOrder?.items?.length) {
+      setSelectedItems((prev) => (Object.keys(prev).length ? {} : prev));
+      return;
+    }
+    setSelectedItems((prev) => {
+      let changed = false;
+      const next = {};
+      const itemsMap = new Map((currentOrder.items || []).map((item) => [String(item.id), item]));
+      Object.entries(prev).forEach(([key, qty]) => {
+        const item = itemsMap.get(key);
+        if (!item) {
+          changed = true;
+          return;
+        }
+        const safeQty = Math.min(qty, item.quantity);
+        if (!safeQty) {
+          changed = true;
+          return;
+        }
+        next[key] = safeQty;
+        if (safeQty !== qty) {
+          changed = true;
+        }
+      });
+      return changed || Object.keys(next).length !== Object.keys(prev).length ? next : prev;
+    });
+  }, [selectionMode, currentOrder?.items]);
+
+  useEffect(() => {
+    setSelectionMode(false);
+    setSelectedItems({});
+    setShowPayment(false);
+    setPaymentAmount('');
+  }, [currentOrder?.id]);
+
   useEffect(() => {
     if (!products.length) {
+      setCategoryOrder([]);
       return;
     }
     const groups = products.reduce((acc, product) => {
@@ -73,6 +129,17 @@ export default function POS({ onAdminClick, onOrderClosed }) {
       acc[category].push(product);
       return acc;
     }, {});
+
+    setCategoryOrder((prev) => {
+      const categories = Object.keys(groups);
+      const filtered = prev.filter((category) => categories.includes(category));
+      const appended = categories.filter((category) => !filtered.includes(category));
+      const next = [...filtered, ...appended];
+      if (next.length !== prev.length || next.some((category, index) => category !== prev[index])) {
+        return next;
+      }
+      return prev;
+    });
 
     setProductOrder((prev) => {
       const next = { ...prev };
@@ -146,11 +213,17 @@ export default function POS({ onAdminClick, onOrderClosed }) {
   const selectOrder = async (id) => {
     try {
       const r = await fetch(`${API_BASE}/orders/${id}`);
-      if (r.ok) setCurrentOrder(await r.json());
+      if (r.ok) {
+        const data = await r.json();
+        setCurrentOrder(data);
+        return data;
+      }
     } catch (e) {
       console.error(e);
     }
+    return null;
   };
+
 
   const addProductToOrder = async (product) => {
     if (!currentOrder) return;
@@ -203,37 +276,71 @@ export default function POS({ onAdminClick, onOrderClosed }) {
     }
   };
 
+
   const closeOrder = async () => {
-    if (!currentOrder || !paymentAmount) return;
-    const payment = parseFloat(paymentAmount);
-    const changeAmount = payment - currentOrder.total_amount;
+  if (!currentOrder || !paymentAmount) return;
+  const payment = parseFloat(paymentAmount);
+  if (Number.isNaN(payment)) {
+    return;
+  }
+
+  if (selectionMode && hasSelection) {
+    const changeAmount = payment - selectedTotal;
     if (changeAmount < 0) {
       alert('Ödeme tutarı yetersiz!');
       return;
     }
     try {
-      const r = await fetch(`${API_BASE}/orders/${currentOrder.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          total_amount: currentOrder.total_amount,
-          payment_received: payment,
-          change_given: changeAmount,
-          is_closed: true,
-        }),
-      });
-      if (r.ok) {
-        setCurrentOrder(null);
-        setPaymentAmount('');
-        setShowPayment(false);
-        fetchActiveOrders();
-        if (onOrderClosed) onOrderClosed();
-        alert(`Adisyon kapatıldı! Para üstü: ${formatCurrency(changeAmount)}`);
+      await settleSelectedItems();
+      setPaymentAmount('');
+      setShowPayment(false);
+      setSelectedItems({});
+      const updated = await selectOrder(currentOrder.id);
+      await fetchActiveOrders();
+      if (changeAmount > 0) {
+        alert(`Seçili ürünler için ödeme alındı! Para üstü: ${formatCurrency(changeAmount)}`);
+      } else {
+        alert('Seçili ürünler için ödeme alındı!');
       }
-    } catch (e) {
-      console.error(e);
+      if (!updated?.items?.length) {
+        setCurrentOrder(null);
+      }
+    } catch (error) {
+      console.error(error);
+      alert('Seçili ürünler için ödeme alınamadı');
     }
-  };
+    return;
+  }
+
+  const changeAmount = payment - (currentOrder.total_amount || 0);
+  if (changeAmount < 0) {
+    alert('Ödeme tutarı yetersiz!');
+    return;
+  }
+  try {
+    const r = await fetch(`${API_BASE}/orders/${currentOrder.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        total_amount: currentOrder.total_amount,
+        payment_received: payment,
+        change_given: changeAmount,
+        is_closed: true,
+      }),
+    });
+    if (r.ok) {
+      setCurrentOrder(null);
+      setPaymentAmount('');
+      setShowPayment(false);
+      fetchActiveOrders();
+      if (onOrderClosed) onOrderClosed();
+      alert(`Adisyon kapatıldı! Para üstü: ${formatCurrency(changeAmount)}`);
+    }
+  } catch (e) {
+    console.error(e);
+  }
+};
+
 
   const cancelOrder = async () => {
     if (!currentOrder) return;
@@ -247,6 +354,60 @@ export default function POS({ onAdminClick, onOrderClosed }) {
     } catch (e) {
       console.error(e);
     }
+  };
+
+  const toggleSelectionMode = () => {
+    setSelectionMode((prev) => {
+      const next = !prev;
+      if (!next) {
+        setSelectedItems({});
+      }
+      setShowPayment(false);
+      setPaymentAmount('');
+      return next;
+    });
+  };
+
+  const toggleItemSelection = (item) => {
+    const key = String(item.id);
+    setSelectedItems((prev) => {
+      if (prev[key]) {
+        const { [key]: _removed, ...rest } = prev;
+        return rest;
+      }
+      const maxQty = item.quantity ?? 0;
+      if (maxQty <= 0) {
+        return prev;
+      }
+      return { ...prev, [key]: maxQty };
+    });
+  };
+
+  const adjustSelectedItemQuantity = (item, delta) => {
+    const key = String(item.id);
+    setSelectedItems((prev) => {
+      const totalAvailable = item.quantity ?? 0;
+      if (totalAvailable <= 0) {
+        if (!prev[key]) {
+          return prev;
+        }
+        const { [key]: _removed, ...rest } = prev;
+        return rest;
+      }
+      const current = prev[key] ?? totalAvailable;
+      const nextQty = Math.min(totalAvailable, Math.max(0, current + delta));
+      if (nextQty <= 0) {
+        if (!prev[key]) {
+          return prev;
+        }
+        const { [key]: _removed, ...rest } = prev;
+        return rest;
+      }
+      if (nextQty === current) {
+        return prev;
+      }
+      return { ...prev, [key]: nextQty };
+    });
   };
 
   const handlePaymentInputChange = (raw) => {
@@ -389,6 +550,55 @@ export default function POS({ onAdminClick, onOrderClosed }) {
     return ordered;
   };
 
+  const handleMoveCategory = (category, direction) => {
+    setCategoryOrder((prev) => {
+      const index = prev.indexOf(category);
+      if (index === -1) {
+        return prev;
+      }
+      const target = index + direction;
+      if (target < 0 || target >= prev.length) {
+        return prev;
+      }
+      const next = [...prev];
+      const [item] = next.splice(index, 1);
+      next.splice(target, 0, item);
+      return next;
+    });
+  };
+
+
+  const settleSelectedItems = async () => {
+    if (!currentOrder || !Object.keys(selectedItems).length) {
+      return;
+    }
+    const itemsMap = new Map((currentOrder.items || []).map((item) => [String(item.id), item]));
+    for (const [itemId, qty] of Object.entries(selectedItems)) {
+      const item = itemsMap.get(itemId);
+      if (!item) {
+        continue;
+      }
+      const remaining = (item.quantity ?? 0) - qty;
+      const endpoint = `${API_BASE}/orders/${currentOrder.id}/items/${item.id}`;
+      if (remaining <= 0) {
+        const response = await fetch(endpoint, { method: 'DELETE' });
+        if (!response.ok) {
+          throw new Error('failed-to-remove-item');
+        }
+      } else {
+        const response = await fetch(endpoint, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ quantity: remaining }),
+        });
+        if (!response.ok) {
+          throw new Error('failed-to-update-item');
+        }
+      }
+    }
+  };
+
+
   const handleMoveProduct = (category, orderedKeys, productKey, direction) => {
     setProductOrder((prev) => {
       const existing = prev[category] ? prev[category].filter((id) => orderedKeys.includes(id)) : [...orderedKeys];
@@ -418,16 +628,47 @@ export default function POS({ onAdminClick, onOrderClosed }) {
   };
 
 
-  const renderCategory = (category, list, isDrink) => {
+  const renderCategory = (category, list, isDrink, position) => {
     const orderedList = getOrderedProducts(category, list);
     const orderedKeys = orderedList.map((product) => getProductKey(product));
     const gridClasses = isDrink
       ? 'grid grid-cols-1 sm:grid-cols-2 gap-3'
       : 'grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3';
+    const canMoveUp = position ? position.index > 0 : false;
+    const canMoveDown = position ? position.index < position.last : false;
+
     return (
       <div key={category}>
         <div className="flex items-center justify-between mb-3">
-          <h3 className="text-lg font-semibold">{category}</h3>
+          <div className="flex items-center gap-2">
+            <h3 className="text-lg font-semibold">{category}</h3>
+            {!positionsLocked && (
+              <div className="flex flex-col rounded bg-white/90 shadow-sm">
+                <button
+                  type="button"
+                  className="text-xs px-1 py-0.5 hover:text-blue-600 disabled:text-gray-300"
+                  disabled={!canMoveUp}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    handleMoveCategory(category, -1);
+                  }}
+                >
+                  ▲
+                </button>
+                <button
+                  type="button"
+                  className="text-xs px-1 py-0.5 hover:text-blue-600 disabled:text-gray-300"
+                  disabled={!canMoveDown}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    handleMoveCategory(category, 1);
+                  }}
+                >
+                  ▼
+                </button>
+              </div>
+            )}
+          </div>
           {!positionsLocked && (
             <span className="text-xs text-gray-500">Sıralamak için okları kullanın</span>
           )}
@@ -484,13 +725,44 @@ export default function POS({ onAdminClick, onOrderClosed }) {
     acc[category].push(product);
     return acc;
   }, {});
-  const groupedEntries = Object.entries(grouped);
-  const foodGroups = groupedEntries.filter(([category]) => !isDrinkCategory(category));
-  const drinkGroups = groupedEntries.filter(([category]) => isDrinkCategory(category));
+  const categories = Object.keys(grouped);
+  const orderedCategoryNames = categoryOrder.length
+    ? categoryOrder.filter((category) => grouped[category])
+    : [];
+  const orderedCategories = [
+    ...orderedCategoryNames,
+    ...categories.filter((category) => !orderedCategoryNames.includes(category)),
+  ];
+  const categoryPositions = new Map(
+    orderedCategories.map((category, index) => [category, { index, last: orderedCategories.length - 1 }])
+  );
+  const orderedEntries = orderedCategories.map((category) => [category, grouped[category]]);
+  const foodGroups = orderedEntries.filter(([category]) => !isDrinkCategory(category));
+  const drinkGroups = orderedEntries.filter(([category]) => isDrinkCategory(category));
   const layoutClass = drinkGroups.length ? 'flex flex-col lg:flex-row gap-6' : 'flex flex-col gap-6';
   const foodColumnClass = drinkGroups.length ? 'space-y-6 lg:w-2/3' : 'space-y-6 w-full';
 
-  const change = paymentAmount ? parseFloat(paymentAmount) - (currentOrder?.total_amount || 0) : 0;
+  const selectedTotal = useMemo(() => {
+    if (!selectionMode || !currentOrder?.items?.length) {
+      return 0;
+    }
+    return currentOrder.items.reduce((sum, item) => {
+      const qty = selectedItems[String(item.id)] || 0;
+      if (!qty) {
+        return sum;
+      }
+      const unit = parseFloat(item.unit_price ?? item.price ?? 0) || 0;
+      return sum + unit * qty;
+    }, 0);
+  }, [selectionMode, selectedItems, currentOrder?.items]);
+
+  const hasSelection = selectionMode && Object.keys(selectedItems).length > 0;
+  const canStartPayment = Boolean(currentOrder?.items?.length) && (!selectionMode || hasSelection);
+  const paymentTarget = hasSelection ? selectedTotal : currentOrder?.total_amount || 0;
+  const paymentButtonLabel = selectionMode && hasSelection ? 'Seçili Ödeme Al' : 'Ödeme Al';
+  const paymentConfirmLabel = selectionMode && hasSelection ? 'Tahsil Et' : 'Kapat';
+  const paymentValue = paymentAmount ? parseFloat(paymentAmount) : 0;
+  const change = paymentAmount ? paymentValue - paymentTarget : 0;
   const tables = [1, 2, 3, 4, 5, 6, 7, 8];
 
   return (
@@ -589,12 +861,12 @@ export default function POS({ onAdminClick, onOrderClosed }) {
               <div className={layoutClass}>
                 <div className={foodColumnClass}>
                   {foodGroups.length > 0
-                    ? foodGroups.map(([category, list]) => renderCategory(category, list, false))
+                    ? foodGroups.map(([category, list]) => renderCategory(category, list, false, categoryPositions.get(category)))
                     : <div className="text-sm text-gray-500">Gösterilecek ürün bulunamadı.</div>}
                 </div>
                 {drinkGroups.length > 0 && (
                   <div className="space-y-6 lg:w-1/3">
-                    {drinkGroups.map(([category, list]) => renderCategory(category, list, true))}
+                    {drinkGroups.map(([category, list]) => renderCategory(category, list, true, categoryPositions.get(category)))}
                   </div>
                 )}
               </div>
@@ -604,55 +876,121 @@ export default function POS({ onAdminClick, onOrderClosed }) {
       </div>
       {currentOrder && (
         <div className="w-80 bg-white shadow-lg">
-          <div className="p-4 border-b">
-            <h3 className="text-lg font-semibold">Adisyon</h3>
-          </div>
+
+<div className="p-4 border-b flex items-center justify-between">
+  <h3 className="text-lg font-semibold">Adisyon</h3>
+  {currentOrder.items?.length ? (
+    <button
+      onClick={toggleSelectionMode}
+      className={`text-sm px-3 py-1 rounded border ${selectionMode ? 'border-blue-500 text-blue-600 bg-blue-50' : 'border-gray-300 text-gray-600 hover:bg-gray-100'}`}
+    >
+      {selectionMode ? 'Tüm Adisyon' : 'Parça Ödeme'}
+    </button>
+  ) : null}
+</div>
+
           <div className="flex-1 p-4 overflow-y-auto max-h-96">
             {!currentOrder.items?.length ? (
               <p className="text-gray-500 text-center py-8">Ürün eklenmedi</p>
             ) : (
+
               <div className="space-y-2">
-                {currentOrder.items.map((item) => (
-                  <div key={item.id} className="flex justify-between items-center p-2 border rounded">
-                    <div className="flex-1">
-                      <div className="font-medium text-sm">{item.product_name}</div>
-                      <div className="text-xs text-gray-600">
-                        {formatCurrency(item.unit_price)} x {item.quantity}
+                {currentOrder.items.map((item) => {
+                  const itemKey = String(item.id);
+                  const isSelected = !!selectedItems[itemKey];
+                  const selectedQty = selectedItems[itemKey] || 0;
+                  return (
+                    <div
+                      key={item.id}
+                      className={`p-2 border rounded ${selectionMode && isSelected ? 'border-blue-400 bg-blue-50' : ''}`}
+                    >
+                      <div className="flex items-center gap-2">
+                        {selectionMode && hasSelection && (
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4"
+                            checked={isSelected}
+                            onChange={() => toggleItemSelection(item)}
+                          />
+                        )}
+                        <div className="flex-1">
+                          <div className="font-medium text-sm">{item.product_name}</div>
+                          <div className="text-xs text-gray-600">
+                            {formatCurrency(item.unit_price)} x {item.quantity}
+                          </div>
+                          {selectionMode && isSelected && (
+                            <div className="mt-1 text-xs text-gray-600">
+                              Seçili: {selectedQty} adet
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={() => updateItemQuantity(item.id, item.quantity - 1)}
+                            className="w-6 h-6 bg-red-500 text-white rounded text-xs"
+                          >
+                            -
+                          </button>
+                          <span className="w-8 text-center text-sm">{item.quantity}</span>
+                          <button
+                            onClick={() => updateItemQuantity(item.id, item.quantity + 1)}
+                            className="w-6 h-6 bg-green-500 text-white rounded text-xs"
+                          >
+                            +
+                          </button>
+                        </div>
+                        <div className="font-semibold text-sm ml-2">{formatCurrency(item.total_price)}</div>
                       </div>
+                      {selectionMode && isSelected && item.quantity > 1 && (
+                        <div className="mt-2 flex items-center justify-end gap-2 text-xs text-gray-600">
+                          <span>Seçili adet:</span>
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              className="px-2 py-0.5 border border-gray-300 rounded hover:bg-gray-100"
+                              onClick={() => adjustSelectedItemQuantity(item, -1)}
+                            >
+                              -
+                            </button>
+                            <span className="w-10 text-center">{selectedQty}</span>
+                            <button
+                              type="button"
+                              className="px-2 py-0.5 border border-gray-300 rounded hover:bg-gray-100"
+                              onClick={() => adjustSelectedItemQuantity(item, 1)}
+                            >
+                              +
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </div>
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => updateItemQuantity(item.id, item.quantity - 1)}
-                        className="w-6 h-6 bg-red-500 text-white rounded text-xs"
-                      >
-                        -
-                      </button>
-                      <span className="w-8 text-center text-sm">{item.quantity}</span>
-                      <button
-                        onClick={() => updateItemQuantity(item.id, item.quantity + 1)}
-                        className="w-6 h-6 bg-green-500 text-white rounded text-xs"
-                      >
-                        +
-                      </button>
-                    </div>
-                    <div className="font-semibold text-sm ml-2">{formatCurrency(item.total_price)}</div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
           <div className="p-4 border-t">
-            <div className="mb-4 flex justify-between text-lg font-bold">
-              <span>Toplam:</span>
+            <div className="mb-2 flex justify-between text-sm text-gray-600">
+              <span>Adisyon Toplamı:</span>
               <span>{formatCurrency(currentOrder.total_amount)}</span>
+            </div>
+            {selectionMode && (
+              <div className="mb-2 flex justify-between text-sm font-medium text-blue-600">
+                <span>Seçilen Tutar:</span>
+                <span>{formatCurrency(selectedTotal)}</span>
+              </div>
+            )}
+            <div className="mb-4 flex justify-between text-lg font-bold">
+              <span>Ödenecek Tutar:</span>
+              <span>{formatCurrency(paymentTarget)}</span>
             </div>
             {!showPayment ? (
               <button
-                onClick={() => setShowPayment(true)}
-                disabled={!currentOrder.items?.length}
+                onClick={() => { setPaymentAmount(''); setShowPayment(true); }}
+                disabled={!canStartPayment}
                 className="w-full py-3 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-400"
               >
-                Ödeme Al
+                {paymentButtonLabel}
               </button>
             ) : (
               <div className="space-y-3">
@@ -689,10 +1027,10 @@ export default function POS({ onAdminClick, onOrderClosed }) {
                   </button>
                   <button
                     onClick={closeOrder}
-                    disabled={!paymentAmount || change < 0}
+                    disabled={!paymentAmount || change < 0 || paymentTarget <= 0}
                     className="flex-1 py-2 bg-green-600 text-white rounded-lg disabled:bg-gray-400"
                   >
-                    Kapat
+                    {paymentConfirmLabel}
                   </button>
                 </div>
               </div>
