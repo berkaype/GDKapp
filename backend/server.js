@@ -365,6 +365,49 @@ app.post('/api/business-expenses', authenticateToken, (req, res) => {
   });
 });
 
+app.put('/api/business-expenses/:id', authenticateToken, (req, res) => {
+  const { id } = req.params;
+  const { expense_name, expense_date, amount } = req.body;
+  const name = (expense_name || '').trim();
+  const dateValue = expense_date ? new Date(expense_date) : null;
+  const parsedAmount = Number(amount);
+
+  if (!name || !dateValue || Number.isNaN(dateValue.getTime()) || !Number.isFinite(parsedAmount)) {
+    return res.status(400).json({ error: 'invalid-expense' });
+  }
+
+  const month = dateValue.getMonth() + 1;
+  const year = dateValue.getFullYear();
+
+  db.run(
+    'UPDATE business_expenses SET expense_name = ?, expense_date = ?, amount = ?, month = ?, year = ? WHERE id = ?',
+    [name, expense_date, parsedAmount, month, year, id],
+    function(err) {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      if (this.changes === 0) {
+        return res.status(404).json({ error: 'expense-not-found' });
+      }
+      res.json({ id: Number(id), expense_name: name, expense_date, amount: parsedAmount, month, year });
+    }
+  );
+});
+
+app.delete('/api/business-expenses/:id', authenticateToken, (req, res) => {
+  const { id } = req.params;
+
+  db.run('DELETE FROM business_expenses WHERE id = ?', [id], function(err) {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    if (this.changes === 0) {
+      return res.status(404).json({ error: 'expense-not-found' });
+    }
+    res.json({ success: true });
+  });
+});
+
   // Stock Codes Routes
   app.get('/api/stock-codes', authenticateToken, (req, res) => {
     db.all('SELECT * FROM stock_codes WHERE is_active = 1 ORDER BY stock_code', (err, rows) => {

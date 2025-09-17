@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useMemo, useState } from 'react';
+﻿import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { getApiBase, authHeaders } from '../utils/api.js';
 import { formatCurrency } from '../utils/format.js';
 
@@ -42,10 +42,38 @@ export default function MaliyetHesaplama() {
   const [newIngredientId, setNewIngredientId] = useState('');
   const [newQuantity, setNewQuantity] = useState('');
   const [newOverride, setNewOverride] = useState('');
+  const [ingredientFilter, setIngredientFilter] = useState('');
+  const searchInputRef = useRef(null);
 
   useEffect(() => {
     loadProducts();
     loadStockOptions();
+  }, []);
+
+  useEffect(() => {
+    const handleShortcut = (event) => {
+      if (event.key === '[' || event.key === '{') {
+        const target = event.target;
+        const isInput =
+          target instanceof HTMLElement &&
+          (target.tagName === 'INPUT' ||
+            target.tagName === 'TEXTAREA' ||
+            target.isContentEditable);
+        if (isInput) {
+          return;
+        }
+        event.preventDefault();
+        const input = searchInputRef.current;
+        if (input) {
+          input.focus();
+          if (typeof input.select === 'function') {
+            input.select();
+          }
+        }
+      }
+    };
+    window.addEventListener('keydown', handleShortcut);
+    return () => window.removeEventListener('keydown', handleShortcut);
   }, []);
 
   useEffect(() => {
@@ -159,6 +187,36 @@ export default function MaliyetHesaplama() {
     }
   }
 
+  const sortedStockOptions = useMemo(() => {
+    return [...stockOptions].sort((a, b) => {
+      const left = String(a?.stock_code ?? '');
+      const right = String(b?.stock_code ?? '');
+      return left.localeCompare(right, 'tr-TR', { numeric: true, sensitivity: 'base' });
+    });
+  }, [stockOptions]);
+
+  const filteredStockOptions = useMemo(() => {
+    const query = ingredientFilter.trim().toLocaleLowerCase('tr-TR');
+    let list = query
+      ? sortedStockOptions.filter((opt) => {
+          const code = String(opt?.stock_code ?? '').toLocaleLowerCase('tr-TR');
+          const name = String(opt?.product_name ?? '').toLocaleLowerCase('tr-TR');
+          const brand = String(opt?.brand ?? '').toLocaleLowerCase('tr-TR');
+          return code.includes(query) || name.includes(query) || brand.includes(query);
+        })
+      : sortedStockOptions;
+    if (newIngredientId) {
+      const selected = sortedStockOptions.find(
+        (opt) => String(opt?.id ?? opt?.stock_code_id) === String(newIngredientId)
+      );
+      if (selected && !list.some((opt) => (opt?.id ?? opt?.stock_code_id) === (selected?.id ?? selected?.stock_code_id))) {
+        list = [selected, ...list];
+      }
+    }
+    return list;
+  }, [sortedStockOptions, ingredientFilter, newIngredientId]);
+
+
   const handleIngredientChange = (index, field, value) => {
     setIngredients((prev) => prev.map((row, idx) => (idx === index ? { ...row, [field]: value } : row)));
   };
@@ -224,6 +282,7 @@ export default function MaliyetHesaplama() {
     setNewIngredientId('');
     setNewQuantity('');
     setNewOverride('');
+    setIngredientFilter('');
     setStatus(null);
   };
 
@@ -345,18 +404,31 @@ export default function MaliyetHesaplama() {
               <div className="text-sm text-slate-500">Manuel maliyet boş bırakılırsa son alım değeri kullanılır.</div>
             </div>
             <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-4">
-              <select
-                className="border rounded px-3 py-2"
-                value={newIngredientId}
-                onChange={(event) => setNewIngredientId(event.target.value)}
-              >
-                <option value="">Stok kalemi seçin</option>
-                {stockOptions.map((opt) => (
-                  <option key={opt.id ?? opt.stock_code_id} value={opt.id ?? opt.stock_code_id}>
-                    {opt.stock_code} - {opt.product_name}{opt.brand ? ` (${opt.brand})` : ''} [{opt.unit}]
-                  </option>
-                ))}
-              </select>
+              <div className="flex flex-col gap-2">
+                <input
+                  ref={searchInputRef}
+                  className="border rounded px-3 py-2"
+                  placeholder="Kod veya ürün ara"
+                  value={ingredientFilter}
+                  onChange={(event) => setIngredientFilter(event.target.value)}
+                />
+                <select
+                  className="border rounded px-3 py-2"
+                  value={newIngredientId}
+                  onChange={(event) => setNewIngredientId(event.target.value)}
+                >
+                  <option value="">Stok kalemi seçin</option>
+                  {filteredStockOptions.length === 0 ? (
+                    <option disabled value="">Sonuç bulunamadı</option>
+                  ) : (
+                    filteredStockOptions.map((opt) => (
+                      <option key={opt.id ?? opt.stock_code_id} value={opt.id ?? opt.stock_code_id}>
+                        {opt.stock_code} - {opt.product_name}{opt.brand ? ` (${opt.brand})` : ''} [{opt.unit}]
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
               <input
                 className="border rounded px-3 py-2"
                 placeholder="Miktar"

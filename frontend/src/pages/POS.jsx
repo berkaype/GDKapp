@@ -126,7 +126,6 @@ export default function POS({ onAdminClick, onOrderClosed }) {
 
   useEffect(() => {
     if (!products.length) {
-      setCategoryOrder([]);
       return;
     }
     const groups = products.reduce((acc, product) => {
@@ -218,7 +217,14 @@ export default function POS({ onAdminClick, onOrderClosed }) {
   const fetchProducts = async () => {
     try {
       const r = await fetch(`${API_BASE}/product-prices`);
-      if (r.ok) setProducts(await r.json());
+      if (r.ok) {
+        const data = await r.json();
+        setProducts(data);
+        if (!data.length) {
+          setCategoryOrder([]);
+          setProductOrder({});
+        }
+      }
     } catch (e) {
       console.error(e);
     }
