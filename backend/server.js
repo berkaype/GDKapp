@@ -146,15 +146,31 @@ function initializeDatabase() {
 
   // Insert initial personnel data
   const personnelData = [
-  ["İlyas", 56000, 8000],
+  ["Ilyas", 56000, 8000],
   ["Cemal", 56000, 8000],
-  ["Rüstem", 50000, 8000],
+  ["Rustum", 50000, 8000],
   ["Yahya", 36000, 8000],
-  ["Özener", 21000, 8000]
-];
+  ["Ozener", 21000, 8000]
+ ];
 
-  personnelData.forEach(person => {
-    db.run(`INSERT OR IGNORE INTO personnel (name, salary, sgk_cost) VALUES (?, ?, ?)`, person);
+  const seedTableIfEmpty = (tableName, insertFn) => {
+    db.get(`SELECT COUNT(*) as count FROM ${tableName}`, (err, row) => {
+      if (err) {
+        console.error(`Error checking ${tableName} count:`, err);
+        return;
+      }
+      if ((row?.count || 0) === 0) {
+        insertFn();
+      }
+    });
+  };
+
+  seedTableIfEmpty('personnel', () => {
+    const stmt = db.prepare('INSERT INTO personnel (name, salary, sgk_cost) VALUES (?, ?, ?)');
+    personnelData.forEach((person) => {
+      stmt.run(person);
+    });
+    stmt.finalize();
   });
 
   // Insert initial stock codes
@@ -162,41 +178,49 @@ function initializeDatabase() {
   ["GDK0001", "Tavuk Eti", "", "kg"],
   ["GDK0002", "Baget Ekmek", "", "adet"],
   ["GDK0003", "Kaymak", "", "kg"],
-  ["GDK0004", "Hindi Etli Salam", "Türkmenzade", "kg"],
-  ["GDK0005", "Macar Salam", "Türkmenzade", "kg"],
+  ["GDK0004", "Hindi Etli Salam", "Turkmenzade", "kg"],
+  ["GDK0005", "Macar Salam", "Turkmenzade", "kg"],
   ["GDK0006", "Dana Jambon", "Enfes", "kg"]
-];
+ ];
 
-  stockData.forEach(stock => {
-    db.run(`INSERT OR IGNORE INTO stock_codes (stock_code, product_name, brand, unit) VALUES (?, ?, ?, ?)`, stock);
+  seedTableIfEmpty('stock_codes', () => {
+    const stmt = db.prepare('INSERT INTO stock_codes (stock_code, product_name, brand, unit) VALUES (?, ?, ?, ?)');
+    stockData.forEach((stock) => {
+      stmt.run(stock);
+    });
+    stmt.finalize();
   });
 
   // Insert initial product prices
   const productData = [
-  ["Baget Karışık Sandviç", "Sandviç", 90, new Date().toISOString().split('T')[0]],
-  ["Baget Karışık Sandviç EXTRA", "Sandviç Extra", 180, new Date().toISOString().split('T')[0]],
-  ["Sandviç (Yarım Ekmek)", "Sandviç", 90, new Date().toISOString().split('T')[0]],
-  ["Sandviç EXTRA (Yarım Ekmek)", "Sandviç Extra", 180, new Date().toISOString().split('T')[0]],
-  ["Tost (Yarım Ekmek)", "Tost", 130, new Date().toISOString().split('T')[0]],
-  ["Döner (Yarım Ekmek)", "Döner", 90, new Date().toISOString().split('T')[0]],
-  ["Döner (Lavaş)", "Döner", 110, new Date().toISOString().split('T')[0]],
-  ["Döner Porsiyon", "Döner Porsiyon", 180, new Date().toISOString().split('T')[0]],
-  ["Döner Porsiyon (Pilavlı)", "Döner Porsiyon", 210, new Date().toISOString().split('T')[0]],
-  ["Kahvaltı Tabağı", "Kahvaltı", 200, new Date().toISOString().split('T')[0]],
+  ["Baget Karisik Sandvic", "Sandvic", 90, new Date().toISOString().split('T')[0]],
+  ["Baget Karisik Sandvic EXTRA", "Sandvic Extra", 180, new Date().toISOString().split('T')[0]],
+  ["Sandvic (Yarim Ekmek)", "Sandvic", 90, new Date().toISOString().split('T')[0]],
+  ["Sandvic EXTRA (Yarim Ekmek)", "Sandvic Extra", 180, new Date().toISOString().split('T')[0]],
+  ["Tost (Yarim Ekmek)", "Tost", 130, new Date().toISOString().split('T')[0]],
+  ["Doner (Yarim Ekmek)", "Doner", 90, new Date().toISOString().split('T')[0]],
+  ["Doner (Lavas)", "Doner", 110, new Date().toISOString().split('T')[0]],
+  ["Doner Porsiyon", "Doner Porsiyon", 180, new Date().toISOString().split('T')[0]],
+  ["Doner Porsiyon (Pilavli)", "Doner Porsiyon", 210, new Date().toISOString().split('T')[0]],
+  ["Kahvalti Tabagi", "Kahvalti", 200, new Date().toISOString().split('T')[0]],
   ["Salata", "Salata", 80, new Date().toISOString().split('T')[0]],
   ["Omlet", "Omlet", 200, new Date().toISOString().split('T')[0]],
-  ["Gazlı Meşrubat", "İçecek", 50, new Date().toISOString().split('T')[0]],
-  ["Portakal Suyu", "İçecek", 80, new Date().toISOString().split('T')[0]],
-  ["Nar Suyu", "İçecek", 100, new Date().toISOString().split('T')[0]],
-  ["Ayran (Büyük)", "İçecek", 30, new Date().toISOString().split('T')[0]],
-  ["Ayran (Küçük)", "İçecek", 15, new Date().toISOString().split('T')[0]],
-  ["Su", "İçecek", 20, new Date().toISOString().split('T')[0]],
-  ["Çay (Büyük)", "İçecek", 30, new Date().toISOString().split('T')[0]],
-  ["Çay (Küçük)", "İçecek", 20, new Date().toISOString().split('T')[0]]
-];
+  ["Gazli Mesrubat", "Icecek", 50, new Date().toISOString().split('T')[0]],
+  ["Portakal Suyu", "Icecek", 80, new Date().toISOString().split('T')[0]],
+  ["Nar Suyu", "Icecek", 100, new Date().toISOString().split('T')[0]],
+  ["Ayran (Buyuk)", "Icecek", 30, new Date().toISOString().split('T')[0]],
+  ["Ayran (Kucuk)", "Icecek", 15, new Date().toISOString().split('T')[0]],
+  ["Su", "Icecek", 20, new Date().toISOString().split('T')[0]],
+  ["Cay (Buyuk)", "Icecek", 30, new Date().toISOString().split('T')[0]],
+  ["Cay (Kucuk)", "Icecek", 20, new Date().toISOString().split('T')[0]]
+ ];
 
-  productData.forEach(product => {
-    db.run(`INSERT OR IGNORE INTO product_prices (product_name, category, price, effective_date) VALUES (?, ?, ?, ?)`, product);
+  seedTableIfEmpty('product_prices', () => {
+    const stmt = db.prepare('INSERT INTO product_prices (product_name, category, price, effective_date) VALUES (?, ?, ?, ?)');
+    productData.forEach((product) => {
+      stmt.run(product);
+    });
+    stmt.finalize();
   });
 
   cleanupDuplicates();
@@ -952,17 +976,36 @@ app.post('/api/orders', (req, res) => {
 app.put('/api/orders/:id', (req, res) => {
   const { id } = req.params;
   const { total_amount, payment_received, change_given, is_closed } = req.body;
-  
-  db.run(`UPDATE orders 
-    SET total_amount = ?, payment_received = ?, change_given = ?, is_closed = ?
-    WHERE id = ?`, 
-    [total_amount, payment_received, change_given, is_closed ? 1 : 0, id], 
-    function(err) {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
-      res.json({ message: 'Order updated successfully' });
-    });
+
+  const normalizedTotal = Number(total_amount) || 0;
+  const paymentDelta = Number(payment_received) || 0;
+  const changeDelta = Number(change_given) || 0;
+
+  db.get('SELECT payment_received, change_given FROM orders WHERE id = ?', [id], (selectErr, current) => {
+    if (selectErr) {
+      return res.status(500).json({ error: selectErr.message });
+    }
+
+    if (!current) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    const existingPayment = Number(current.payment_received) || 0;
+    const existingChange = Number(current.change_given) || 0;
+    const updatedPayment = Math.round((existingPayment + paymentDelta) * 100) / 100;
+    const updatedChange = Math.round((existingChange + changeDelta) * 100) / 100;
+
+    db.run(`UPDATE orders 
+      SET total_amount = ?, payment_received = ?, change_given = ?, is_closed = ?
+      WHERE id = ?`, 
+      [normalizedTotal, updatedPayment, updatedChange, is_closed ? 1 : 0, id], 
+      function(err) {
+        if (err) {
+          return res.status(500).json({ error: err.message });
+        }
+        res.json({ message: 'Order updated successfully' });
+      });
+  });
 });
 
 app.delete('/api/orders/:id', (req, res) => {
@@ -1052,6 +1095,109 @@ app.delete('/api/orders/:orderId/items/:itemId', (req, res) => {
   });
 });
 
+app.post('/api/orders/:orderId/partial-payment', (req, res) => {
+  const { orderId } = req.params;
+  const { items, amount, payment, change, table_number, order_type, description } = req.body || {};
+
+  if (!Array.isArray(items) || !items.length) {
+    return res.status(400).json({ error: 'Parca ödeme için geçersiz ürün listesi' });
+  }
+
+  const sanitizedItems = items
+    .map((item) => {
+      const productName = item.product_name || item.name;
+      const quantity = Number(item.quantity) || 0;
+      const unitPrice = Number(item.unit_price != null ? item.unit_price : (item.price != null ? item.price : 0)) || 0;
+      if (!productName || quantity <= 0) {
+        return null;
+      }
+      const totalPrice = unitPrice * quantity;
+      return { product_name: productName, quantity, unit_price: unitPrice, total_price: totalPrice };
+    })
+    .filter(Boolean);
+
+  if (!sanitizedItems.length) {
+    return res.status(400).json({ error: 'Parca ödeme için geçersiz ürün bilgisi' });
+  }
+
+  const computedTotal = sanitizedItems.reduce((sum, item) => sum + item.total_price, 0);
+  const requestedAmount = Number(amount);
+  const totalAmount = !Number.isNaN(requestedAmount) && requestedAmount > 0
+    ? requestedAmount
+    : Math.round(computedTotal * 100) / 100;
+  const paymentValue = !Number.isNaN(Number(payment)) && Number(payment) > 0 ? Number(payment) : totalAmount;
+  const changeValue = !Number.isNaN(Number(change)) ? Number(change) : (paymentValue - totalAmount);
+
+  db.get('SELECT table_number, order_type FROM orders WHERE id = ?', [orderId], (err, orderRow) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    if (!orderRow) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    const baseTable = table_number != null ? table_number : orderRow.table_number;
+    const baseType = order_type || orderRow.order_type;
+    const paymentDescription = description || `Parca ödeme #${orderId}`;
+
+    db.serialize(() => {
+      db.run('BEGIN TRANSACTION');
+
+      db.run(
+        `INSERT INTO orders (table_number, order_type, description, total_amount, payment_received, change_given, is_closed, accounted, order_date)
+         VALUES (?, ?, ?, ?, ?, ?, 1, 0, CURRENT_TIMESTAMP)`,
+        [baseTable, baseType, paymentDescription, totalAmount, paymentValue, changeValue],
+        function(insertErr) {
+          if (insertErr) {
+            return db.run('ROLLBACK', () => res.status(500).json({ error: insertErr.message }));
+          }
+
+          const partialOrderId = this.lastID;
+          const stmt = db.prepare('INSERT INTO order_items (order_id, product_name, quantity, unit_price, total_price) VALUES (?, ?, ?, ?, ?)');
+          let hasError = false;
+
+          sanitizedItems.forEach(({ product_name, quantity, unit_price, total_price }) => {
+            stmt.run([partialOrderId, product_name, quantity, unit_price, total_price], (runErr) => {
+              if (runErr && !hasError) {
+                hasError = true;
+                db.run('ROLLBACK', () => res.status(500).json({ error: runErr.message }));
+              }
+            });
+          });
+
+          stmt.finalize((finalizeErr) => {
+            if (hasError) {
+              return;
+            }
+            if (finalizeErr) {
+              return db.run('ROLLBACK', () => res.status(500).json({ error: finalizeErr.message }));
+            }
+
+            db.run(
+              'UPDATE orders SET payment_received = COALESCE(payment_received, 0) + ? WHERE id = ?',
+              [totalAmount, orderId],
+              (updateErr) => {
+                if (updateErr) {
+                  return db.run('ROLLBACK', () => res.status(500).json({ error: updateErr.message }));
+                }
+
+                db.run('COMMIT', (commitErr) => {
+                  if (commitErr) {
+                    return res.status(500).json({ error: commitErr.message });
+                  }
+
+                  res.json({ partial_order_id: partialOrderId });
+                });
+              }
+            );
+          });
+        }
+      );
+    });
+  });
+});
+
+
 // Helper function to update order total
 function updateOrderTotal(orderId) {
   db.get('SELECT SUM(total_price) as total FROM order_items WHERE order_id = ?', 
@@ -1069,7 +1215,7 @@ function updateOrderTotal(orderId) {
 // Daily Revenue
 app.get('/api/daily-revenue', (req, res) => {
   const today = new Date().toISOString().split('T')[0];
-  db.get('SELECT SUM(total_amount) as daily_revenue FROM orders WHERE DATE(order_date) = ? AND is_closed = 1 AND (accounted = 0 OR accounted IS NULL)',
+  db.get('SELECT SUM(COALESCE(payment_received, 0) - COALESCE(change_given, 0)) as daily_revenue FROM orders WHERE DATE(order_date) = ? AND is_closed = 1 AND (accounted = 0 OR accounted IS NULL)',
     [today], (err, row) => {
     if (err) {
       return res.status(500).json({ error: err.message });

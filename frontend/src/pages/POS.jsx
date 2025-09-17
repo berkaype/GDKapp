@@ -22,10 +22,18 @@ export default function POS({ onAdminClick, onOrderClosed }) {
 
   const getProductKey = (product) => {
     const category = product?.category || 'Diğer';
-    const identifier = product?.id ?? product?.product_name ?? '';
-    return category + '::' + identifier;
+    let identifier = product?.product_name;
+    if (!identifier) {
+      if (product?.id !== undefined && product?.id !== null) {
+        identifier = `#${product.id}`;
+      } else if (product?.name) {
+        identifier = product.name;
+      } else {
+        identifier = '';
+      }
+    }
+    return `${category}::${identifier}`;
   };
-
   const drinkCategoryTokens = ['icecek', 'içecek', 'icecekler', 'içecekler'];
 
   useEffect(() => {
@@ -146,21 +154,44 @@ export default function POS({ onAdminClick, onOrderClosed }) {
       let changed = false;
 
       Object.entries(groups).forEach(([category, list]) => {
-        const ids = list.map((item) => getProductKey(item));
+        const stableIds = list.map((item) => getProductKey(item));
+        const aliasMap = new Map();
+
+        list.forEach((item) => {
+          const stableKey = getProductKey(item);
+          aliasMap.set(stableKey, stableKey);
+          if (item?.id !== undefined && item?.id !== null) {
+            aliasMap.set(`${category}::${item.id}`, stableKey);
+            aliasMap.set(`${category}::#${item.id}`, stableKey);
+          }
+          if (item?.product_name) {
+            aliasMap.set(`${category}::${item.product_name}`, stableKey);
+          }
+        });
+
         const existing = next[category];
         if (!existing) {
-          next[category] = ids;
+          next[category] = stableIds;
           changed = true;
           return;
         }
-        const filtered = existing.filter((id) => ids.includes(id));
-        ids.forEach((id) => {
-          if (!filtered.includes(id)) {
-            filtered.push(id);
+
+        const normalized = [];
+        existing.forEach((key) => {
+          const normalizedKey = aliasMap.get(key) || key;
+          if (!normalized.includes(normalizedKey) && stableIds.includes(normalizedKey)) {
+            normalized.push(normalizedKey);
           }
         });
-        if (filtered.length !== existing.length || filtered.some((id, index) => id !== existing[index])) {
-          next[category] = filtered;
+
+        stableIds.forEach((key) => {
+          if (!normalized.includes(key)) {
+            normalized.push(key);
+          }
+        });
+
+        if (normalized.length !== existing.length || normalized.some((key, index) => key !== existing[index])) {
+          next[category] = normalized;
           changed = true;
         }
       });
@@ -284,30 +315,70 @@ export default function POS({ onAdminClick, onOrderClosed }) {
     return;
   }
 
+
   if (selectionMode && hasSelection) {
-    const changeAmount = payment - selectedTotal;
+    const selectedDetails = (currentOrder.items || []).map((item) => {
+      const qty = selectedItems[String(item.id)];
+      if (!qty) {
+        return null;
+      }
+      const unitPrice = Number(item.unit_price ?? item.price ?? 0) || 0;
+      return {
+        item_id: item.id,
+        product_name: item.product_name,
+        quantity: qty,
+        unit_price: unitPrice,
+        total_price: unitPrice * qty,
+      };
+    }).filter(Boolean);
+    if (!selectedDetails.length) {
+      alert('\u00d6deme i\u00e7in \u00fcr\u00fcn se\u00e7ilmedi.');
+      return;
+    }
+    const selectedSum = selectedDetails.reduce((sum, detail) => sum + detail.total_price, 0);
+    const targetAmount = Math.round((selectedTotal || selectedSum) * 100) / 100;
+    const changeAmount = Math.round((payment - targetAmount) * 100) / 100;
     if (changeAmount < 0) {
-      alert('Ödeme tutarı yetersiz!');
+      alert('\u00d6deme tutar\u0131 yetersiz!');
       return;
     }
     try {
+      const response = await fetch(`${API_BASE}/orders/${currentOrder.id}/partial-payment`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          items: selectedDetails,
+          amount: targetAmount,
+          payment,
+          change: changeAmount,
+          table_number: currentOrder.table_number ?? null,
+          order_type: currentOrder.order_type ?? 'table',
+          description: currentOrder.description || null,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error('partial-payment-failed');
+      }
       await settleSelectedItems();
       setPaymentAmount('');
       setShowPayment(false);
       setSelectedItems({});
       const updated = await selectOrder(currentOrder.id);
       await fetchActiveOrders();
+      if (onOrderClosed) {
+        onOrderClosed();
+      }
       if (changeAmount > 0) {
-        alert(`Seçili ürünler için ödeme alındı! Para üstü: ${formatCurrency(changeAmount)}`);
+        alert(`Se\u00e7ili \u00fcr\u00fcnler i\u00e7in \u00f6deme al\u0131nd\u0131! Para \u00fcst\u00fc: ${formatCurrency(changeAmount)}`);
       } else {
-        alert('Seçili ürünler için ödeme alındı!');
+        alert('Se\u00e7ili \u00fcr\u00fcnler i\u00e7in \u00f6deme al\u0131nd\u0131!');
       }
       if (!updated?.items?.length) {
         setCurrentOrder(null);
       }
     } catch (error) {
       console.error(error);
-      alert('Seçili ürünler için ödeme alınamadı');
+      alert('Se\u00e7ili \u00fcr\u00fcnler i\u00e7in \u00f6deme al\u0131namad\u0131');
     }
     return;
   }
@@ -537,16 +608,41 @@ export default function POS({ onAdminClick, onOrderClosed }) {
     if (!order || !Array.isArray(order) || !order.length) {
       return [...list];
     }
-    const map = new Map(list.map((item) => [getProductKey(item), item]));
-    const ordered = [];
-    order.forEach((id) => {
-      const item = map.get(id);
-      if (item) {
-        ordered.push(item);
-        map.delete(id);
+    const map = new Map();
+    const used = new Set();
+
+    list.forEach((item) => {
+      const stableKey = getProductKey(item);
+      map.set(stableKey, item);
+      if (item?.id !== undefined && item?.id !== null) {
+        map.set(`${category}::${item.id}`, item);
+        map.set(`${category}::#${item.id}`, item);
+      }
+      if (item?.product_name) {
+        map.set(`${category}::${item.product_name}`, item);
       }
     });
-    map.forEach((item) => ordered.push(item));
+
+    const ordered = [];
+    order.forEach((savedKey) => {
+      const item = map.get(savedKey);
+      if (item) {
+        const stableKey = getProductKey(item);
+        if (!used.has(stableKey)) {
+          ordered.push(item);
+          used.add(stableKey);
+        }
+      }
+    });
+
+    list.forEach((item) => {
+      const stableKey = getProductKey(item);
+      if (!used.has(stableKey)) {
+        ordered.push(item);
+        used.add(stableKey);
+      }
+    });
+
     return ordered;
   };
 
@@ -902,15 +998,20 @@ export default function POS({ onAdminClick, onOrderClosed }) {
                   return (
                     <div
                       key={item.id}
-                      className={`p-2 border rounded ${selectionMode && isSelected ? 'border-blue-400 bg-blue-50' : ''}`}
+                      onClick={() => { if (selectionMode) { toggleItemSelection(item); } }}
+                      className={`p-2 border rounded transition-colors ${selectionMode ? 'cursor-pointer' : ''} ${selectionMode && isSelected ? 'border-green-500 bg-green-200 bg-opacity-70' : ''}`}
                     >
                       <div className="flex items-center gap-2">
-                        {selectionMode && hasSelection && (
+                        {selectionMode && (
                           <input
                             type="checkbox"
                             className="h-4 w-4"
                             checked={isSelected}
-                            onChange={() => toggleItemSelection(item)}
+                            onClick={(event) => event.stopPropagation()}
+                            onChange={(event) => {
+                              event.stopPropagation();
+                              toggleItemSelection(item);
+                            }}
                           />
                         )}
                         <div className="flex-1">
@@ -926,14 +1027,14 @@ export default function POS({ onAdminClick, onOrderClosed }) {
                         </div>
                         <div className="flex items-center gap-1">
                           <button
-                            onClick={() => updateItemQuantity(item.id, item.quantity - 1)}
+                            onClick={(event) => { event.stopPropagation(); updateItemQuantity(item.id, item.quantity - 1); }}
                             className="w-6 h-6 bg-red-500 text-white rounded text-xs"
                           >
                             -
                           </button>
                           <span className="w-8 text-center text-sm">{item.quantity}</span>
                           <button
-                            onClick={() => updateItemQuantity(item.id, item.quantity + 1)}
+                            onClick={(event) => { event.stopPropagation(); updateItemQuantity(item.id, item.quantity + 1); }}
                             className="w-6 h-6 bg-green-500 text-white rounded text-xs"
                           >
                             +
@@ -948,7 +1049,7 @@ export default function POS({ onAdminClick, onOrderClosed }) {
                             <button
                               type="button"
                               className="px-2 py-0.5 border border-gray-300 rounded hover:bg-gray-100"
-                              onClick={() => adjustSelectedItemQuantity(item, -1)}
+                              onClick={(event) => { event.stopPropagation(); adjustSelectedItemQuantity(item, -1); }}
                             >
                               -
                             </button>
@@ -956,7 +1057,7 @@ export default function POS({ onAdminClick, onOrderClosed }) {
                             <button
                               type="button"
                               className="px-2 py-0.5 border border-gray-300 rounded hover:bg-gray-100"
-                              onClick={() => adjustSelectedItemQuantity(item, 1)}
+                              onClick={(event) => { event.stopPropagation(); adjustSelectedItemQuantity(item, 1); }}
                             >
                               +
                             </button>
