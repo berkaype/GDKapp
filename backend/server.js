@@ -1,4 +1,4 @@
-﻿const express = require('express');
+const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const cors = require('cors');
 const bcrypt = require('bcrypt');
@@ -578,34 +578,30 @@ app.post('/api/product-prices', authenticateToken, (req, res) => {
 app.put('/api/product-prices/:id', authenticateToken, (req, res) => {
   const { id } = req.params;
   const { price, effective_date } = req.body;
-  
-  // First get the current product details
-  db.get('SELECT * FROM product_prices WHERE id = ?', [id], (err, currentProduct) => {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-    
-    if (!currentProduct) {
-      return res.status(404).json({ error: 'Product not found' });
-    }
-    
-    // Create new price entry (preserving price history)
-    db.run(`INSERT INTO product_prices (product_name, category, price, effective_date) 
-      VALUES (?, ?, ?, ?)`, 
-      [currentProduct.product_name, currentProduct.category, price, effective_date], 
-      function(err) {
-        if (err) {
-          return res.status(500).json({ error: err.message });
+
+  const normalizedPrice = Number(price);
+  if (Number.isNaN(normalizedPrice) || normalizedPrice <= 0) {
+    return res.status(400).json({ error: 'Geçersiz fiyat' });
+  }
+
+  db.run(`UPDATE product_prices
+      SET price = ?, effective_date = ?
+      WHERE id = ?`,
+    [normalizedPrice, effective_date, id],
+    function(err) {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      if (this.changes === 0) {
+        return res.status(404).json({ error: 'Product not found' });
+      }
+      db.get('SELECT * FROM product_prices WHERE id = ?', [id], (selectErr, updatedRow) => {
+        if (selectErr) {
+          return res.status(500).json({ error: selectErr.message });
         }
-        res.json({ 
-          id: this.lastID, 
-          product_name: currentProduct.product_name, 
-          category: currentProduct.category, 
-          price, 
-          effective_date 
-        });
+        res.json(updatedRow);
       });
-  });
+    });
 });
 
 // Delete a product price entry (removes a single history row)
@@ -1100,7 +1096,7 @@ app.post('/api/orders/:orderId/partial-payment', (req, res) => {
   const { items, amount, payment, change, table_number, order_type, description } = req.body || {};
 
   if (!Array.isArray(items) || !items.length) {
-    return res.status(400).json({ error: 'Parca ödeme için geçersiz ürün listesi' });
+    return res.status(400).json({ error: 'Parça ödeme için geçersiz ürün listesi' });
   }
 
   const sanitizedItems = items
@@ -1117,7 +1113,7 @@ app.post('/api/orders/:orderId/partial-payment', (req, res) => {
     .filter(Boolean);
 
   if (!sanitizedItems.length) {
-    return res.status(400).json({ error: 'Parca ödeme için geçersiz ürün bilgisi' });
+    return res.status(400).json({ error: 'Parça ödeme için geçersiz ürün bilgisi' });
   }
 
   const computedTotal = sanitizedItems.reduce((sum, item) => sum + item.total_price, 0);
@@ -1138,7 +1134,7 @@ app.post('/api/orders/:orderId/partial-payment', (req, res) => {
 
     const baseTable = table_number != null ? table_number : orderRow.table_number;
     const baseType = order_type || orderRow.order_type;
-    const paymentDescription = description || `Parca ödeme #${orderId}`;
+    const paymentDescription = description || `Parça ödeme #${orderId}`;
 
     db.serialize(() => {
       db.run('BEGIN TRANSACTION');
@@ -1197,6 +1193,31 @@ app.post('/api/orders/:orderId/partial-payment', (req, res) => {
   });
 });
 
+
+app.post('/api/maintenance/cleanup-prices', authenticateToken, (req, res) => {
+  db.serialize(() => {
+    db.run('BEGIN TRANSACTION');
+    db.run(`DELETE FROM product_prices
+            WHERE id NOT IN (
+              SELECT id FROM (
+                SELECT id,
+                       ROW_NUMBER() OVER (PARTITION BY product_name ORDER BY effective_date DESC, id DESC) as rn
+                FROM product_prices
+              ) ranked
+              WHERE ranked.rn <= 5
+            )`, (err) => {
+      if (err) {
+        return db.run('ROLLBACK', () => res.status(500).json({ error: err.message }));
+      }
+      db.run('COMMIT', (commitErr) => {
+        if (commitErr) {
+          return res.status(500).json({ error: commitErr.message });
+        }
+        res.json({ message: 'Fazla fiyat geçmişi temizlendi.' });
+      });
+    });
+  });
+});
 
 // Helper function to update order total
 function updateOrderTotal(orderId) {
