@@ -376,26 +376,56 @@ app.post('/api/business-expenses', authenticateToken, (req, res) => {
   });
 
   app.post('/api/stock-codes', authenticateToken, (req, res) => {
-    const { product_name, brand, unit } = req.body;
-  
-  // Get next stock code by taking max numeric part of all existing codes
-  db.get("SELECT COALESCE(MAX(CAST(SUBSTR(stock_code, 4) AS INTEGER)), 0) AS maxnum FROM stock_codes", (err, row) => {
-    if (err) {
-      return res.status(500).json({ error: err.message });
+  const { product_name, brand, unit } = req.body;
+
+  const reuseSql = "SELECT id, stock_code FROM stock_codes WHERE is_active = 0 ORDER BY CAST(SUBSTR(stock_code, 4) AS INTEGER) DESC, id DESC LIMIT 1";
+  db.get(reuseSql, (reuseErr, inactive) => {
+    if (reuseErr) {
+      return res.status(500).json({ error: reuseErr.message });
     }
 
-    const nextNum = (row && row.maxnum ? row.maxnum : 0) + 1;
-    let nextCode = `GDK${String(nextNum).padStart(4, '0')}`;
-
-      db.run('INSERT INTO stock_codes (stock_code, product_name, brand, unit) VALUES (?, ?, ?, ?)', 
-        [nextCode, product_name, brand || '', unit], function(err) {
-        if (err) {
-          return res.status(500).json({ error: err.message });
+    if (inactive) {
+      db.run(
+        'UPDATE stock_codes SET product_name = ?, brand = ?, unit = ?, is_active = 1 WHERE id = ?',
+        [product_name, brand || '', unit, inactive.id],
+        function(updateErr) {
+          if (updateErr) {
+            return res.status(500).json({ error: updateErr.message });
+          }
+          res.json({ id: inactive.id, stock_code: inactive.stock_code, product_name, brand: brand || '', unit });
         }
-        res.json({ id: this.lastID, stock_code: nextCode, product_name, brand, unit });
-      });
+      );
+      return;
+    }
+
+    const nextSql = "SELECT stock_code FROM stock_codes WHERE stock_code LIKE 'GDK____' ORDER BY CAST(SUBSTR(stock_code, 4) AS INTEGER) DESC LIMIT 1";
+    db.get(nextSql, (err, row) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+
+      let nextNumber = 1;
+      if (row && row.stock_code) {
+        const numericPart = Number(row.stock_code.slice(3));
+        if (!Number.isNaN(numericPart)) {
+          nextNumber = numericPart + 1;
+        }
+      }
+
+      const nextCode = `GDK${String(nextNumber).padStart(4, '0')}`;
+      db.run(
+        'INSERT INTO stock_codes (stock_code, product_name, brand, unit) VALUES (?, ?, ?, ?)',
+        [nextCode, product_name, brand || '', unit],
+        function(insertErr) {
+          if (insertErr) {
+            return res.status(500).json({ error: insertErr.message });
+          }
+          res.json({ id: this.lastID, stock_code: nextCode, product_name, brand: brand || '', unit });
+        }
+      );
     });
   });
+});
 
   // Update a stock code
   app.put('/api/stock-codes/:id', authenticateToken, (req, res) => {
@@ -1311,3 +1341,4 @@ process.on('SIGINT', () => {
     process.exit(0);
   });
 });
+
