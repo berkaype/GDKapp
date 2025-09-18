@@ -124,11 +124,11 @@ export default function POS({ onAdminClick, onOrderClosed }) {
     setPaymentAmount('');
   }, [currentOrder?.id]);
 
-  useEffect(() => {
+  const groupedProducts = useMemo(() => {
     if (!products.length) {
-      return;
+      return {};
     }
-    const groups = products.reduce((acc, product) => {
+    return products.reduce((acc, product) => {
       const category = product.category || 'Diğer';
       if (!acc[category]) {
         acc[category] = [];
@@ -136,9 +136,22 @@ export default function POS({ onAdminClick, onOrderClosed }) {
       acc[category].push(product);
       return acc;
     }, {});
+  }, [products]);
+
+  useEffect(() => {
+    const categories = Object.keys(groupedProducts);
+    if (!categories.length) {
+      setCategoryOrder([]);
+      setProductOrder((prev) => (Object.keys(prev).length ? {} : prev));
+      return;
+    }
+
+    const entries = Object.entries(groupedProducts);
 
     setCategoryOrder((prev) => {
-      const categories = Object.keys(groups);
+      if (!prev.length) {
+        return categories;
+      }
       const filtered = prev.filter((category) => categories.includes(category));
       const appended = categories.filter((category) => !filtered.includes(category));
       const next = [...filtered, ...appended];
@@ -152,7 +165,7 @@ export default function POS({ onAdminClick, onOrderClosed }) {
       const next = { ...prev };
       let changed = false;
 
-      Object.entries(groups).forEach(([category, list]) => {
+      entries.forEach(([category, list]) => {
         const stableIds = list.map((item) => getProductKey(item));
         const aliasMap = new Map();
 
@@ -196,7 +209,7 @@ export default function POS({ onAdminClick, onOrderClosed }) {
       });
 
       Object.keys(next).forEach((category) => {
-        if (!groups[category]) {
+        if (!groupedProducts[category]) {
           delete next[category];
           changed = true;
         }
@@ -204,7 +217,7 @@ export default function POS({ onAdminClick, onOrderClosed }) {
 
       return changed ? next : prev;
     });
-  }, [products]);
+  }, [groupedProducts]);
   const fetchActiveOrders = async () => {
     try {
       const r = await fetch(`${API_BASE}/orders?status=open`);
@@ -731,7 +744,7 @@ export default function POS({ onAdminClick, onOrderClosed }) {
 
 
   const renderCategory = (category, list, isDrink, position) => {
-    const orderedList = getOrderedProducts(category, list);
+    const orderedList = orderedProductsByCategory[category] || list;
     const orderedKeys = orderedList.map((product) => getProductKey(product));
     const gridClasses = isDrink
       ? 'grid grid-cols-1 sm:grid-cols-2 gap-3'
@@ -819,30 +832,57 @@ export default function POS({ onAdminClick, onOrderClosed }) {
     );
   };
 
-  const grouped = products.reduce((acc, product) => {
-    const category = product.category || 'Diğer';
-    if (!acc[category]) {
-      acc[category] = [];
+  const orderedProductsByCategory = useMemo(() => {
+    const result = {};
+    Object.entries(groupedProducts).forEach(([category, list]) => {
+      result[category] = getOrderedProducts(category, list);
+    });
+    return result;
+  }, [groupedProducts, productOrder]);
+
+  const categories = useMemo(() => Object.keys(groupedProducts), [groupedProducts]);
+
+  const orderedCategories = useMemo(() => {
+    if (!categories.length) {
+      return [];
     }
-    acc[category].push(product);
-    return acc;
-  }, {});
-  const categories = Object.keys(grouped);
-  const orderedCategoryNames = categoryOrder.length
-    ? categoryOrder.filter((category) => grouped[category])
-    : [];
-  const orderedCategories = [
-    ...orderedCategoryNames,
-    ...categories.filter((category) => !orderedCategoryNames.includes(category)),
-  ];
-  const categoryPositions = new Map(
-    orderedCategories.map((category, index) => [category, { index, last: orderedCategories.length - 1 }])
+    const base = categoryOrder.filter((category) => groupedProducts[category]);
+    const extras = categories.filter((category) => !base.includes(category));
+    return [...base, ...extras];
+  }, [categories, categoryOrder, groupedProducts]);
+
+  const categoryPositions = useMemo(() => {
+    const lastIndex = orderedCategories.length - 1;
+    return new Map(
+      orderedCategories.map((category, index) => [category, { index, last: lastIndex }])
+    );
+  }, [orderedCategories]);
+
+  const { foodGroups, drinkGroups } = useMemo(() => {
+    const entries = orderedCategories
+      .map((category) => [category, groupedProducts[category]])
+      .filter(([, list]) => Array.isArray(list) && list.length);
+    const foods = [];
+    const drinks = [];
+    entries.forEach((entry) => {
+      if (isDrinkCategory(entry[0])) {
+        drinks.push(entry);
+      } else {
+        foods.push(entry);
+      }
+    });
+    return { foodGroups: foods, drinkGroups: drinks };
+  }, [orderedCategories, groupedProducts]);
+
+  const layoutClass = useMemo(
+    () => (drinkGroups.length ? 'flex flex-col lg:flex-row gap-6' : 'flex flex-col gap-6'),
+    [drinkGroups.length]
   );
-  const orderedEntries = orderedCategories.map((category) => [category, grouped[category]]);
-  const foodGroups = orderedEntries.filter(([category]) => !isDrinkCategory(category));
-  const drinkGroups = orderedEntries.filter(([category]) => isDrinkCategory(category));
-  const layoutClass = drinkGroups.length ? 'flex flex-col lg:flex-row gap-6' : 'flex flex-col gap-6';
-  const foodColumnClass = drinkGroups.length ? 'space-y-6 lg:w-2/3' : 'space-y-6 w-full';
+
+  const foodColumnClass = useMemo(
+    () => (drinkGroups.length ? 'space-y-6 lg:w-2/3' : 'space-y-6 w-full'),
+    [drinkGroups.length]
+  );
 
   const selectedTotal = useMemo(() => {
     if (!selectionMode || !currentOrder?.items?.length) {
