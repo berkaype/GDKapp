@@ -141,8 +141,6 @@ export default function POS({ onAdminClick, onOrderClosed }) {
   useEffect(() => {
     const categories = Object.keys(groupedProducts);
     if (!categories.length) {
-      setCategoryOrder([]);
-      setProductOrder((prev) => (Object.keys(prev).length ? {} : prev));
       return;
     }
 
