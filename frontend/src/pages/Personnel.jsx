@@ -117,7 +117,7 @@ export default function Personnel() {
     const salaryValue = Number(form.salary);
     const sgkValue = Number(form.sgk_cost);
     if (!trimmedName || !Number.isFinite(salaryValue) || !Number.isFinite(sgkValue)) {
-      setError('Geçerli bir ad, maas ve SGK tutari girin.');
+      setError('Geçerli bir ad, maaş ve SGK tutarı girin.');
       return;
     }
     if (!effectivePeriod) return;
@@ -221,7 +221,7 @@ export default function Personnel() {
           </div>
         </div>
         <div className="flex flex-wrap gap-6 text-sm text-gray-600">
-          <span>Toplam Maas: <strong className="text-gray-900">{formatCurrency(totals.salary)}</strong></span>
+          <span>Toplam Maaş: <strong className="text-gray-900">{formatCurrency(totals.salary)}</strong></span>
           <span>Toplam SGK: <strong className="text-gray-900">{formatCurrency(totals.sgk)}</strong></span>
           <span>Genel Toplam: <strong className="text-gray-900">{formatCurrency(totals.total)}</strong></span>
         </div>
@@ -236,7 +236,7 @@ export default function Personnel() {
           />
           <input
             className="border rounded px-3 py-2"
-            placeholder="Maas"
+            placeholder="Maaş"
             type="number"
             value={form.salary}
             onChange={(event) => setForm({ ...form, salary: event.target.value })}
@@ -273,7 +273,7 @@ export default function Personnel() {
             <thead>
               <tr className="text-left text-gray-500">
                 <th className="py-2">Isim</th>
-                <th className="py-2">Maas</th>
+                <th className="py-2">Maaş</th>
                 <th className="py-2">SGK</th>
                 <th />
               </tr>

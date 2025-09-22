@@ -1,17 +1,17 @@
-﻿import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { getApiBase, authHeaders } from '../utils/api.js';
 import { formatCurrency } from '../utils/format.js';
 
 const API_BASE = getApiBase();
 const monthOptions = [
   { value: '01', label: 'Ocak' },
-  { value: '02', label: 'Åžubat' },
+  { value: '02', label: 'Şubat' },
   { value: '03', label: 'Mart' },
   { value: '04', label: 'Nisan' },
   { value: '05', label: 'Mayıs' },
   { value: '06', label: 'Haziran' },
   { value: '07', label: 'Temmuz' },
-  { value: '08', label: 'AÄŸustos' },
+  { value: '08', label: 'Ağustos' },
   { value: '09', label: 'Eylül' },
   { value: '10', label: 'Ekim' },
   { value: '11', label: 'Kasım' },
@@ -38,39 +38,48 @@ function BarChart({ data }) {
   if (!Array.isArray(data) || data.length === 0) {
     return null;
   }
-  const maxValue = data.reduce((max, item) => {
-    const value = Math.abs(Number(item?.value) || 0);
-    return value > max ? value : max;
-  }, 0) || 1;
-  const ticks = Array.from({ length: 4 }, (_, idx) => idx + 1);
+  const maxValue =
+    data.reduce((max, item) => {
+      const value = Math.abs(Number(item?.value) || 0);
+      return value > max ? value : max;
+    }, 0) || 1;
+
+  // Rebuilt chart: fixed pixel calculus for reliability
+  const plotHeight = 420; // vertical space for bars only
+  const minBarPx = 12; // minimum visible height for non-zero values
 
   return (
     <div className="relative rounded-lg border border-gray-200 bg-white px-6 py-6 shadow-sm">
-      <div className="absolute inset-x-6 top-10 bottom-14 flex flex-col justify-between pointer-events-none">
-        {ticks.map((tick) => (
-          <div key={tick} className="border-t border-dashed border-gray-200" />
-        ))}
+      <div
+        className="relative w-full overflow-hidden rounded-md"
+        style={{ height: `${plotHeight}px`, backgroundImage: 'repeating-linear-gradient(to top, rgba(0,0,0,0.06) 0 1px, transparent 1px 72px)' }}
+      >
+        <div className="relative z-10 h-full flex items-end justify-around gap-6">
+          {data.map((item) => {
+            const value = Number(item?.value) || 0;
+            const magnitude = Math.abs(value);
+            const px = Math.max(Math.round((magnitude / maxValue) * (plotHeight - 8)), magnitude > 0 ? minBarPx : 0);
+            const isNegative = value < 0;
+            const barClass = item?.key === 'net' ? 'bg-green-600' : (isNegative ? 'bg-rose-500' : (item.color || 'bg-blue-500'));
+
+            return (
+              <div key={item.key || item.label} className="flex-1 min-w-[64px] flex items-end justify-center">
+                <div className={`w-12 rounded-t-md transition-all duration-300 ${barClass}`} style={{ height: `${px}px` }} />
+              </div>
+            );
+          })}
+        </div>
       </div>
-      <div className="flex items-end justify-around gap-6 h-64">
+      {/* labels row under plot area */}
+      <div className="mt-4 flex items-start justify-around gap-6">
         {data.map((item) => {
           const value = Number(item?.value) || 0;
-          const magnitude = Math.abs(value);
-          const percent = Math.max((magnitude / maxValue) * 100, magnitude > 0 ? 8 : 0);
           const isNegative = value < 0;
-          const barClass = isNegative ? 'bg-rose-500' : item.color || 'bg-blue-500';
-
+          const valueClass = item?.key === 'net' ? 'text-green-700' : (isNegative ? 'text-rose-600' : 'text-gray-900');
           return (
-            <div key={item.key || item.label} className="flex flex-col items-center flex-1 min-w-[64px]">
-              <div className={`mb-3 text-sm font-semibold ${isNegative ? 'text-rose-600' : 'text-gray-900'}`}>
-                {formatCurrency(value)}
-              </div>
-              <div className="relative flex h-48 w-full items-end justify-center">
-                <div
-                  className={`w-12 rounded-t-md transition-all duration-300 ${barClass}`}
-                  style={{ height: `${percent}%` }}
-                />
-              </div>
-              <div className="mt-3 text-xs font-medium text-gray-600 text-center">{item.label}</div>
+            <div key={`${item.key || item.label}-labels`} className="flex-1 min-w-[64px] flex flex-col items-center">
+              <div className={`text-sm font-semibold text-center ${valueClass}`}>{formatCurrency(value)}</div>
+              <div className="text-xs font-medium text-gray-600 text-center">{item.label}</div>
             </div>
           );
         })}
@@ -106,7 +115,7 @@ export default function Reports() {
         }
 
         if (!closingsRes.ok) {
-          throw new Error('Ciro bilgisi alÄ±namadÄ±');
+          throw new Error('Ciro bilgisi alınamadı');
         }
 
         const closings = await closingsRes.json();
@@ -144,7 +153,7 @@ export default function Reports() {
         setData({ revenue, personnel, expenses, stock });
       } catch (err) {
         console.error(err);
-        setError('Veriler getirilemedi. LÃ¼tfen tekrar deneyin.');
+        setError('Veriler getirilemedi. Lütfen tekrar deneyin.');
         setData({ revenue: 0, personnel: 0, expenses: 0, stock: 0 });
       } finally {
         setLoading(false);
@@ -162,22 +171,22 @@ export default function Reports() {
 
   const chartData = useMemo(
     () => [
-      { key: 'revenue', label: 'Ciro', value: data.revenue, color: 'bg-emerald-500' },
+      { key: 'revenue', label: 'Ciro', value: data.revenue, color: 'bg-blue-500' },
       { key: 'personnel', label: 'Personel', value: data.personnel, color: 'bg-orange-500' },
       { key: 'expenses', label: 'İşletme Giderleri', value: data.expenses, color: 'bg-red-500' },
-      { key: 'stock', label: 'Stok', value: data.stock, color: 'bg-blue-500' },
-      { key: 'net', label: 'Net Kar', value: net, color: net >= 0 ? 'bg-emerald-700' : 'bg-rose-500' },
+      { key: 'stock', label: 'Stok', value: data.stock, color: 'bg-yellow-500' },
+      { key: 'net', label: 'Net Kâr', value: net, color: net >= 0 ? 'bg-green-600' : 'bg-rose-500' },
     ],
     [data.revenue, data.personnel, data.expenses, data.stock, net],
   );
 
   const summaryItems = useMemo(
     () => [
-      { label: 'Toplam Ciro', value: data.revenue, accent: 'text-emerald-600' },
+      { label: 'Toplam Ciro', value: data.revenue, accent: 'text-blue-600' },
       { label: 'Personel', value: data.personnel, accent: 'text-orange-600' },
       { label: 'İşletme Giderleri', value: data.expenses, accent: 'text-red-600' },
-      { label: 'Stok', value: data.stock, accent: 'text-blue-600' },
-      { label: 'Net Kar', value: net, accent: net >= 0 ? 'text-emerald-700' : 'text-rose-600' },
+      { label: 'Stok', value: data.stock, accent: 'text-yellow-600' },
+      { label: 'Net Kâr', value: net, accent: 'text-green-700' },
     ],
     [data.revenue, data.personnel, data.expenses, data.stock, net],
   );
@@ -190,24 +199,16 @@ export default function Reports() {
     <div className="p-6">
       <div className="bg-white rounded p-6 shadow-sm space-y-4">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-          <h2 className="text-xl font-semibold">Ciro ve Net Kar Raporu</h2>
+          <h2 className="text-xl font-semibold">Ciro ve Net Kâr Raporu</h2>
           <div className="flex items-center gap-2">
-            <select
-              className="border rounded px-3 py-2"
-              value={month}
-              onChange={(event) => setMonth(event.target.value)}
-            >
+            <select className="border rounded px-3 py-2" value={month} onChange={(event) => setMonth(event.target.value)}>
               {monthOptions.map((opt) => (
                 <option key={opt.value} value={opt.value}>
                   {opt.label}
                 </option>
               ))}
             </select>
-            <select
-              className="border rounded px-3 py-2"
-              value={year}
-              onChange={(event) => setYear(event.target.value)}
-            >
+            <select className="border rounded px-3 py-2" value={year} onChange={(event) => setYear(event.target.value)}>
               {yearOptions.map((yr) => (
                 <option key={yr} value={yr}>
                   {yr}
@@ -218,15 +219,13 @@ export default function Reports() {
         </div>
 
         <div className="text-sm text-gray-500">
-          {currentMonthLabel && `${currentMonthLabel} ${year}`} dÃ¶nemi iÃ§in hesaplanan deÄŸerler gÃ¶sterilmektedir.
+          {currentMonthLabel && `${currentMonthLabel} ${year}`} dönemi için hesaplanan değerler gösterilmektedir.
         </div>
 
-        {error && (
-          <div className="rounded bg-red-100 text-red-700 px-4 py-2">{error}</div>
-        )}
+        {error && <div className="rounded bg-red-100 text-red-700 px-4 py-2">{error}</div>}
 
         {loading ? (
-          <div className="text-sm text-gray-500">Veriler yÃ¼kleniyor...</div>
+          <div className="text-sm text-gray-500">Veriler yükleniyor...</div>
         ) : (
           <div className="flex flex-col gap-6 lg:flex-row">
             <div className="w-full space-y-4 lg:w-64">
@@ -246,4 +245,3 @@ export default function Reports() {
     </div>
   );
 }
-

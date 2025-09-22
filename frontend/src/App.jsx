@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { ChevronLeft, Users, DollarSign, Package, BarChart3, Settings, LogOut, Lock, Calculator } from 'lucide-react';
 
 import POS from './pages/POS.jsx';
@@ -23,6 +23,7 @@ export default function App() {
   const [showLogin, setShowLogin] = useState(false);
   const [loginData, setLoginData] = useState({ username: 'admin', password: 'admin' });
   const [dailyRevenue, setDailyRevenue] = useState(0);
+  const [now, setNow] = useState(new Date());
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -35,6 +36,11 @@ export default function App() {
     const handler = () => fetchDailyRevenue();
     window.addEventListener('refresh-daily-revenue', handler);
     return () => window.removeEventListener('refresh-daily-revenue', handler);
+  }, []);
+
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
   }, []);
 
   const fetchDailyRevenue = async () => {
@@ -63,10 +69,10 @@ export default function App() {
         setUser(data.user);
         setShowLogin(false);
       } else {
-        alert('Geçersiz kullanıcı adı veya şifre');
+        alert('Geçersiz kullanici adi veya sifre');
       }
     } catch (error) {
-      alert('Giriş yaparken bir hata oluştu');
+      alert('Giris yaparken bir hata olustu');
     }
   };
 
@@ -92,7 +98,7 @@ export default function App() {
         <div className="bg-white rounded-lg p-8 w-96">
           <div className="text-center mb-6">
             <Lock className="icon-lg mx-auto text-blue-600 mb-4" />
-            <h2 className="text-2xl font-bold">Admin Girişi</h2>
+            <h2 className="text-2xl font-bold">Admin Girisi</h2>
           </div>
           <form onSubmit={handleLogin} className="space-y-4">
             <input
@@ -100,21 +106,21 @@ export default function App() {
               value={loginData.username}
               onChange={(event) => setLoginData({ ...loginData, username: event.target.value })}
               className="w-full px-3 py-2 border rounded"
-              placeholder="Kullanıcı adı"
+              placeholder="Kullanici adi"
             />
             <input
               type="password"
               value={loginData.password}
               onChange={(event) => setLoginData({ ...loginData, password: event.target.value })}
               className="w-full px-3 py-2 border rounded"
-              placeholder="Şifre"
+              placeholder="Sifre"
             />
             <div className="flex gap-3">
               <button type="button" onClick={() => setShowLogin(false)} className="flex-1 py-2 bg-gray-500 text-white rounded">
-                İptal
+                Iptal
               </button>
               <button type="submit" className="flex-1 py-2 bg-blue-600 text-white rounded">
-                Giriş
+                Giris
               </button>
             </div>
           </form>
@@ -130,6 +136,11 @@ export default function App() {
           <div className="flex flex-wrap items-center gap-4">
             <div className="flex items-center gap-4">
               <h1 className="text-2xl font-bold text-gray-900">Büfe Yönetim Sistemi</h1>
+              {currentPage === 'pos' && (
+                <div className="text-gray-600 font-mono tabular-nums">
+                  {now.toLocaleTimeString('tr-TR', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}
+                </div>
+              )}
               {currentPage !== 'pos' && (
                 <button
                   onClick={() => setCurrentPage('pos')}
@@ -153,12 +164,12 @@ export default function App() {
                     });
                     if (response.ok) {
                       window.dispatchEvent(new CustomEvent('refresh-daily-revenue'));
-                      alert('Günsonu alındı');
+                      alert('Günsonu alindi');
                     } else {
-                      alert('Günsonu alınmadı');
+                      alert('Günsonu alinmadi');
                     }
                   } catch (error) {
-                    alert('Günsonu alınmadı');
+                    alert('Günsonu alinmadi');
                   }
                 }}
                 className="px-3 py-2 bg-red-600 hover:bg-red-700 text-white rounded"
@@ -167,7 +178,7 @@ export default function App() {
               </button>
               {isAuthenticated && (
                 <button onClick={handleLogout} className="flex items-center text-red-600">
-                  <LogOut className="h-4 w-4 mr-1" /> Çıkış
+                  <LogOut className="h-4 w-4 mr-1" /> Çikis
                 </button>
               )}
             </div>
@@ -183,14 +194,14 @@ export default function App() {
             <nav className="p-4">
               {[
                 { id: 'personnel', label: 'Personel Giderleri', icon: Users },
-                { id: 'expenses', label: 'İşletme Giderleri', icon: DollarSign },
+                { id: 'expenses', label: 'Isletme Giderleri', icon: DollarSign },
                 { id: 'stock-codes', label: 'Stok Kodu Listesi', icon: Package },
                 { id: 'stock-purchase', label: 'Stok Güncelleme', icon: Package },
-                { id: 'product-prices', label: 'Ürün Fiyatları', icon: Settings },
+                { id: 'product-prices', label: 'Ürün Fiyatlari', icon: Settings },
                 { id: 'costing', label: 'Maliyet Hesaplama', icon: Calculator },
                 { id: 'reports', label: 'Ciro ve Net Kâr', icon: BarChart3 },
                 { id: 'closings', label: 'Ciro Geçmişi', icon: BarChart3 },
-                { id: 'export', label: 'Veri Yazdırma', icon: BarChart3 },
+                { id: 'export', label: 'Veri Yazdirma', icon: BarChart3 },
               ].map(({ id, label, icon: Icon }) => (
                 <button
                   key={id}
@@ -219,3 +230,4 @@ export default function App() {
     </div>
   );
 }
+
