@@ -17,11 +17,11 @@ export default function ProductPrices() {
   const [history, setHistory] = useState([]);
   const [historyProduct, setHistoryProduct] = useState(null);
   const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [loadıng, setLoadıng] = useState(false);
 
   const load = async () => {
     try {
-      setLoading(true);
+      setLoadıng(true);
       const response = await fetch(`${API_BASE}/product-prices`);
       if (!response.ok) {
         throw new Error('load-failed');
@@ -33,7 +33,7 @@ export default function ProductPrices() {
       console.error(err);
       setError('Fiyat listesi alınamadı. Lütfen tekrar deneyin.');
     } finally {
-      setLoading(false);
+      setLoadıng(false);
     }
   };
 
@@ -201,13 +201,13 @@ export default function ProductPrices() {
       <div className="bg-white rounded p-4 shadow-sm space-y-4">
         <div>
           <h3 className="text-xl font-semibold mb-3">Yeni Ürün Fiyatı</h3>
-          <form onSubmit={handleCreate} className="grid grid-cols-1 md:grid-cols-4 gap-3">
+          <form onSubmit={handleCreate} className="grid grid-cols-1 md:grid-cols-5 gap-3 md:items-end">
             <input className="border rounded px-3 py-2" placeholder="Ürün Adı" value={form.product_name} onChange={(e) => handleChange('product_name', e.target.value)} required />
             <input className="border rounded px-3 py-2" placeholder="Kategori" value={form.category} onChange={(e) => handleChange('category', e.target.value)} required />
             <input className="border rounded px-3 py-2" placeholder="Fiyat" type="number" value={form.price} onChange={(e) => handleChange('price', e.target.value)} required />
             <input className="border rounded px-3 py-2" type="date" value={form.effective_date} onChange={(e) => handleChange('effective_date', e.target.value)} required />
-            <div className="flex items-center">
-              <button className="px-4 py-2 bg-blue-600 text-white rounded" disabled={loading}>Ekle</button>
+            <div className="flex items-center md:justify-center">
+              <button className="w-full md:w-auto px-4 py-2 bg-blue-600 text-white rounded" disabled={loadıng}>Ekle</button>
             </div>
           </form>
         </div>
@@ -215,12 +215,12 @@ export default function ProductPrices() {
         {updateFor && (
           <div className="border-t pt-4">
             <h3 className="text-lg font-semibold mb-2">Fiyat Güncelle: {updateFor.product_name}</h3>
-            <form onSubmit={handleUpdate} className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <form onSubmit={handleUpdate} className="grid grid-cols-1 md:grid-cols-4 gap-3 md:items-end">
               <input className="border rounded px-3 py-2" placeholder="Yeni Fiyat" type="number" value={form.price} onChange={(e) => handleChange('price', e.target.value)} required />
               <input className="border rounded px-3 py-2" type="date" value={form.effective_date} onChange={(e) => handleChange('effective_date', e.target.value)} required />
-              <div className="flex items-center gap-2">
-                <button className="px-4 py-2 bg-blue-600 text-white rounded" disabled={loading}>Güncelle</button>
-                <button type="button" onClick={() => { setUpdateFor(null); resetForm(); }} className="px-4 py-2 bg-gray-500 text-white rounded">İptal</button>
+              <div className="flex items-center gap-2 md:justify-end md:col-span-2">
+                <button className="w-full md:w-auto px-4 py-2 bg-blue-600 text-white rounded" disabled={loadıng}>Güncelle</button>
+                <button type="button" onClick={() => { setUpdateFor(null); resetForm(); }} className="w-full md:w-auto px-4 py-2 bg-gray-500 text-white rounded">İptal</button>
               </div>
             </form>
           </div>
@@ -231,12 +231,18 @@ export default function ProductPrices() {
         {Object.entries(byCategory).map(([category, list]) => (
           <div key={category} className="bg-white rounded p-4 shadow-sm">
             <h4 className="text-lg font-semibold mb-2">{category}</h4>
-            <table className="w-full text-sm">
+            <table className="w-full table-fixed text-sm">
+            <colgroup>
+              <col className="w-[55%]" />
+              <col className="w-[15%]" />
+              <col className="w-[20%]" />
+              <col className="w-[10%]" />
+            </colgroup>
               <thead className="text-left text-gray-500">
                 <tr>
                   <th className="py-2">Ürün</th>
-                  <th className="py-2">Fiyat</th>
-                  <th className="py-2">Son Güncelleme</th>
+                  <th className="py-2 text-right w-28">Fiyat</th>
+                  <th className="py-2 text-right w-32">Son Güncelleme</th>
                   <th />
                 </tr>
               </thead>
@@ -244,9 +250,9 @@ export default function ProductPrices() {
                 {list.map((product) => (
                   <tr key={product.id} className="border-t">
                     <td className="py-2 font-medium">{product.product_name}</td>
-                    <td className="py-2 text-green-600 font-semibold">{formatCurrency(product.price)}</td>
-                    <td className="py-2 text-sm text-gray-500">{new Date(product.effective_date).toLocaleDateString('tr-TR')}</td>
-                    <td className="py-2 text-right space-x-3">
+                    <td className="py-2 text-right text-green-600 font-semibold">{formatCurrency(product.price)}</td>
+                    <td className="py-2 text-right text-sm text-gray-500">{new Date(product.effective_date).toLocaleDateString('tr-TR')}</td>
+                    <td className="py-2 text-right space-x-3 whitespace-nowrap">
                       <button onClick={() => beginUpdate(product)} className="text-blue-600 hover:underline">Fiyat Güncelle</button>
                       <button onClick={() => showHistory(product)} className="text-purple-600 hover:underline">Geçmiş</button>
                       <button onClick={() => removeRow(product)} className="text-red-600 hover:underline">Sil</button>
@@ -257,7 +263,7 @@ export default function ProductPrices() {
             </table>
           </div>
         ))}
-        {rows.length === 0 && !loading && (
+        {rows.length === 0 && !loadıng && (
           <div className="text-sm text-gray-500">Listelenecek ürün bulunamadı.</div>
         )}
       </div>

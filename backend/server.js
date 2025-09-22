@@ -4,7 +4,25 @@ const cors = require('cors');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const path = require('path');
+const fs = require('fs');
 require('dotenv').config();
+
+const isPkg = typeof process.pkg !== 'undefined';
+const executableDir = isPkg ? path.dirname(process.execPath) : __dirname;
+const dataDir = isPkg ? path.join(executableDir, 'data') : __dirname;
+
+if (isPkg && !fs.existsSync(dataDir)) {
+  fs.mkdirSync(dataDir, { recursive: true });
+}
+
+const bundledDbPath = path.join(__dirname, 'bufe.db');
+const dbPath = isPkg ? path.join(dataDir, 'bufe.db') : bundledDbPath;
+
+if (isPkg && !fs.existsSync(dbPath) && fs.existsSync(bundledDbPath)) {
+  fs.copyFileSync(bundledDbPath, dbPath);
+}
+
+const publicDir = path.join(__dirname, 'public');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -13,10 +31,10 @@ const JWT_SECRET = process.env.JWT_SECRET || 'bufe_secret_key_2024';
 // Middleware
 app.use(cors());
 app.use(express.json());
-app.use(express.static('public'));
+app.use(express.static(publicDir));
 
 // Database initialization
-const db = new sqlite3.Database('./bufe.db', (err) => {
+const db = new sqlite3.Database(dbPath, (err) => {
   if (err) {
     console.error('Error opening database:', err);
   } else {
@@ -47,6 +65,21 @@ function initializeDatabase() {
     is_active BOOLEAN DEFAULT 1,
     created_date DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
+
+  // Personnel wages table to keep month based history
+  db.run(`CREATE TABLE IF NOT EXISTS personnel_wages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    personnel_id INTEGER NOT NULL,
+    month INTEGER NOT NULL,
+    year INTEGER NOT NULL,
+    salary REAL NOT NULL,
+    sgk_cost REAL NOT NULL,
+    created_date DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(personnel_id, year, month),
+    FOREIGN KEY (personnel_id) REFERENCES personnel(id) ON DELETE CASCADE
+  )`);
+  db.run('CREATE INDEX IF NOT EXISTS idx_personnel_wages_personnel ON personnel_wages(personnel_id)');
+  db.run('CREATE INDEX IF NOT EXISTS idx_personnel_wages_period ON personnel_wages(year, month)');
 
   // Business expenses table
   db.run(`CREATE TABLE IF NOT EXISTS business_expenses (
@@ -173,6 +206,29 @@ function initializeDatabase() {
     stmt.finalize();
   });
 
+  seedTableIfEmpty('personnel_wages', () => {
+    db.all('SELECT id, salary, sgk_cost FROM personnel', (err, people) => {
+      if (err) {
+        console.error('Error seeding personnel wages:', err);
+        return;
+      }
+      if (!people || people.length === 0) {
+        return;
+      }
+      const now = new Date();
+      const seedMonth = now.getMonth() + 1;
+      const seedYear = now.getFullYear();
+      const stmt = db.prepare('INSERT OR IGNORE INTO personnel_wages (personnel_id, month, year, salary, sgk_cost) VALUES (?, ?, ?, ?, ?)');
+      people.forEach((person) => {
+        if (person.salary == null || person.sgk_cost == null) {
+          return;
+        }
+        stmt.run(person.id, seedMonth, seedYear, person.salary, person.sgk_cost);
+      });
+      stmt.finalize();
+    });
+  });
+
   // Insert initial stock codes
   const stockData = [
   ["GDK0001", "Tavuk Eti", "", "kg"],
@@ -251,6 +307,80 @@ function cleanupDuplicates() {
   )`);
 }
 
+function normalizeMonthYear(monthInput, yearInput) {
+  const now = new Date();
+  let month = Number(monthInput);
+  let year = Number(yearInput);
+  if (!Number.isInteger(month) || month < 1 || month > 12) {
+    month = now.getMonth() + 1;
+  }
+  if (!Number.isInteger(year) || year < 1970) {
+    year = now.getFullYear();
+  }
+  return { month, year };
+}
+
+function buildPersonnelResponse(personnelRows, wageRows, targetMonth, targetYear) {
+  const wageMap = new Map();
+  wageRows.forEach((row) => {
+    if (!wageMap.has(row.personnel_id)) {
+      wageMap.set(row.personnel_id, []);
+    }
+    wageMap.get(row.personnel_id).push(row);
+  });
+  wageMap.forEach((list) => {
+    list.sort((a, b) => {
+      if (a.year === b.year) {
+        return a.month - b.month;
+      }
+      return a.year - b.year;
+    });
+  });
+  return personnelRows
+    .filter((row) => row.is_active !== 0)
+    .map((person) => {
+      const entries = wageMap.get(person.id) || [];
+      const direct = entries.find((entry) => entry.year === targetYear && entry.month === targetMonth);
+      const latest = entries.length > 0 ? entries[entries.length - 1] : null;
+      const wage = direct || latest;
+      const salary = wage ? Number(wage.salary) : Number(person.salary);
+      const sgk = wage ? Number(wage.sgk_cost) : Number(person.sgk_cost);
+      return {
+        id: person.id,
+        name: person.name,
+        salary: Number.isFinite(salary) ? salary : 0,
+        sgk_cost: Number.isFinite(sgk) ? sgk : 0,
+        source_month: wage ? wage.month : null,
+        source_year: wage ? wage.year : null,
+        is_inherited: Boolean(!direct && wage),
+      };
+    });
+}
+
+function syncLatestPersonnelWage(personnelId, callback) {
+  db.get(
+    'SELECT salary, sgk_cost FROM personnel_wages WHERE personnel_id = ? ORDER BY year DESC, month DESC LIMIT 1',
+    [personnelId],
+    (err, row) => {
+      if (err) {
+        if (callback) callback(err);
+        return;
+      }
+      if (!row) {
+        if (callback) callback(null);
+        return;
+      }
+      db.run(
+        'UPDATE personnel SET salary = ?, sgk_cost = ? WHERE id = ?',
+        [row.salary, row.sgk_cost, personnelId],
+        (updateErr) => {
+          if (callback) callback(updateErr);
+        },
+      );
+    },
+  );
+}
+
 // Middleware for authentication
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
@@ -287,35 +417,157 @@ app.post('/api/login', (req, res) => {
 
 // Personnel Routes
 app.get('/api/personnel', authenticateToken, (req, res) => {
-  db.all('SELECT * FROM personnel WHERE is_active = 1 ORDER BY name', (err, rows) => {
+  const { month: monthParam, year: yearParam } = req.query;
+  const { month, year } = normalizeMonthYear(monthParam, yearParam);
+
+  db.all('SELECT * FROM personnel WHERE is_active = 1 ORDER BY name', (err, personnelRows) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
-    res.json(rows);
+
+    db.all(
+      'SELECT personnel_id, month, year, salary, sgk_cost FROM personnel_wages WHERE (year < ? OR (year = ? AND month <= ?)) ORDER BY year, month',
+      [year, year, month],
+      (wErr, wageRows) => {
+        if (wErr) {
+          return res.status(500).json({ error: wErr.message });
+        }
+
+        db.all(
+          'SELECT DISTINCT year, month FROM personnel_wages ORDER BY year DESC, month DESC',
+          [],
+          (pErr, periodRows) => {
+            if (pErr) {
+              return res.status(500).json({ error: pErr.message });
+            }
+
+            const rows = buildPersonnelResponse(personnelRows, wageRows, month, year);
+            const availablePeriods = periodRows.map((row) => ({ year: row.year, month: row.month }));
+            const hasRequested = availablePeriods.some((period) => period.year === year && period.month === month);
+            if (!hasRequested) {
+              availablePeriods.push({ year, month });
+            }
+            availablePeriods.sort((a, b) => {
+              if (a.year === b.year) {
+                return b.month - a.month;
+              }
+              return b.year - a.year;
+            });
+
+            res.json({
+              period: { month, year },
+              rows,
+              availablePeriods,
+            });
+          },
+        );
+      },
+    );
   });
 });
 
 app.post('/api/personnel', authenticateToken, (req, res) => {
-  const { name, salary, sgk_cost } = req.body;
-  db.run('INSERT INTO personnel (name, salary, sgk_cost) VALUES (?, ?, ?)', 
-    [name, salary, sgk_cost], function(err) {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-    res.json({ id: this.lastID, name, salary, sgk_cost });
-  });
+  const { name, salary, sgk_cost, month, year } = req.body;
+  const trimmedName = typeof name === 'string' ? name.trim() : '';
+  const normalizedSalary = Number(salary);
+  const normalizedSgk = Number(sgk_cost);
+
+  if (!trimmedName || !Number.isFinite(normalizedSalary) || !Number.isFinite(normalizedSgk)) {
+    return res.status(400).json({ error: 'Invalid personnel payload' });
+  }
+
+  const period = normalizeMonthYear(month, year);
+
+  db.run(
+    'INSERT INTO personnel (name, salary, sgk_cost) VALUES (?, ?, ?)',
+    [trimmedName, normalizedSalary, normalizedSgk],
+    function(insertErr) {
+      if (insertErr) {
+        return res.status(500).json({ error: insertErr.message });
+      }
+      const personnelId = this.lastID;
+      db.run(
+        'INSERT OR REPLACE INTO personnel_wages (personnel_id, month, year, salary, sgk_cost) VALUES (?, ?, ?, ?, ?)',
+        [personnelId, period.month, period.year, normalizedSalary, normalizedSgk],
+        (wageErr) => {
+          if (wageErr) {
+            return res.status(500).json({ error: wageErr.message });
+          }
+          syncLatestPersonnelWage(personnelId, (syncErr) => {
+            if (syncErr) {
+              return res.status(500).json({ error: syncErr.message });
+            }
+            res.status(201).json({
+              id: personnelId,
+              name: trimmedName,
+              salary: normalizedSalary,
+              sgk_cost: normalizedSgk,
+              source_month: period.month,
+              source_year: period.year,
+              is_inherited: false,
+            });
+          });
+        },
+      );
+    },
+  );
 });
 
 app.put('/api/personnel/:id', authenticateToken, (req, res) => {
-  const { name, salary, sgk_cost } = req.body;
   const { id } = req.params;
-  
-  db.run('UPDATE personnel SET name = ?, salary = ?, sgk_cost = ? WHERE id = ?', 
-    [name, salary, sgk_cost, id], function(err) {
-    if (err) {
-      return res.status(500).json({ error: err.message });
+  const { name, salary, sgk_cost, month, year } = req.body;
+  const personnelId = Number(id);
+  const trimmedName = typeof name === 'string' ? name.trim() : '';
+  const normalizedSalary = Number(salary);
+  const normalizedSgk = Number(sgk_cost);
+
+  if (!Number.isInteger(personnelId) || personnelId <= 0) {
+    return res.status(400).json({ error: 'Invalid personnel id' });
+  }
+
+  if (!trimmedName || !Number.isFinite(normalizedSalary) || !Number.isFinite(normalizedSgk)) {
+    return res.status(400).json({ error: 'Invalid personnel payload' });
+  }
+
+  const period = normalizeMonthYear(month, year);
+
+  db.get('SELECT id FROM personnel WHERE id = ?', [personnelId], (lookupErr, existing) => {
+    if (lookupErr) {
+      return res.status(500).json({ error: lookupErr.message });
     }
-    res.json({ message: 'Personnel updated successfully' });
+    if (!existing) {
+      return res.status(404).json({ error: 'Personnel not found' });
+    }
+
+    db.serialize(() => {
+      db.run(
+        'UPDATE personnel SET name = ? WHERE id = ?',
+        [trimmedName, personnelId],
+        (nameErr) => {
+          if (nameErr) {
+            return res.status(500).json({ error: nameErr.message });
+          }
+
+          db.run(
+            'INSERT OR REPLACE INTO personnel_wages (personnel_id, month, year, salary, sgk_cost) VALUES (?, ?, ?, ?, ?)',
+            [personnelId, period.month, period.year, normalizedSalary, normalizedSgk],
+            (wageErr) => {
+              if (wageErr) {
+                return res.status(500).json({ error: wageErr.message });
+              }
+
+              syncLatestPersonnelWage(personnelId, (syncErr) => {
+                if (syncErr) {
+                  return res.status(500).json({ error: syncErr.message });
+                }
+
+                res.json({ message: 'Personnel updated successfully' });
+              });
+            },
+          );
+        },
+      );
+    });
   });
 });
 
@@ -1361,6 +1613,13 @@ app.post('/api/end-of-day', authenticateToken, (req, res) => {
       });
     });
   });
+});
+
+app.get('*', (req, res, next) => {
+  if (req.path.startsWith('/api')) {
+    return next();
+  }
+  res.sendFile(path.join(publicDir, 'index.html'));
 });
 
 // Error handling middleware

@@ -3,9 +3,12 @@
   "version": "1.0.0",
   "description": "Bufe Yonetim Sistemi Backend API",
   "main": "server.js",
+  "bin": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "nodemon server.js",
+    "build:assets": "node ../scripts/prepare-public.js",
+    "build:exe": "npm run build:assets && pkg .",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
@@ -25,7 +28,23 @@
     "dotenv": "^16.4.5"
   },
   "devDependencies": {
-    "nodemon": "^3.0.1"
+    "nodemon": "^3.0.1",
+    "pkg": "^5.8.1"
+  },
+  "pkg": {
+    "scripts": [
+      "server.js"
+    ],
+    "assets": [
+      "public/**/*",
+      "bufe.db",
+      "node_modules/sqlite3/build/Release/node_sqlite3.node",
+      "node_modules/sqlite3/lib/binding/**/*",
+      "node_modules/bcrypt/lib/binding/**/*"
+    ],
+    "targets": [
+      "node18-win-x64"
+    ],
+    "outputPath": "../release"
   }
 }
-
