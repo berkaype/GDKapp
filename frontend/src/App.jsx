@@ -138,7 +138,7 @@ export default function App() {
             <div className="flex items-center gap-4">
               <h1 className="text-2xl font-bold text-gray-900">Büfe Yönetim Sistemi</h1>
               {currentPage === 'pos' && (
-                <div className="text-gray-600 font-mono tabular-nums">
+                <div className="text-green-700 font-bold text-3xl md:text-4xl font-mono tabular-nums">
                   {now.toLocaleTimeString('tr-TR', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                 </div>
               )}
@@ -200,6 +200,7 @@ export default function App() {
                 { id: 'stock-purchase', label: 'Stok Güncelleme', icon: Package },
                 { id: 'product-prices', label: 'Ürün Fiyatlari', icon: Settings },
                 { id: 'costing', label: 'Maliyet Hesaplama', icon: Calculator },
+                { id: 'reports', label: 'Ciro ve Net Kar Raporu', icon: BarChart3 },
                                 { id: 'performance', label: 'Performans Takibi', icon: BarChart3 },
                 { id: 'closings', label: 'Ciro Geçmişi', icon: BarChart3 },
                 { id: 'export', label: 'Veri Yazdirma', icon: BarChart3 },
@@ -232,5 +233,6 @@ export default function App() {
     </div>
   );
 }
+
 
 

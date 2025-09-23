@@ -172,6 +172,22 @@ function initializeDatabase() {
     FOREIGN KEY (stock_code_id) REFERENCES stock_codes(id)
   )`);
 
+  // App settings (key-value JSON store)
+  db.run(`CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
+
+  // ML models table (store simple regression models and metadata)
+  db.run(`CREATE TABLE IF NOT EXISTS ml_models (
+    name TEXT PRIMARY KEY,
+    version INTEGER NOT NULL,
+    trained_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    meta TEXT,
+    coefficients TEXT
+  )`);
+
   // Insert default admin user
   const hashedPassword = bcrypt.hashSync('admin', 10);
   db.run(`INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)`, 
@@ -305,6 +321,235 @@ function cleanupDuplicates() {
   db.run(`DELETE FROM personnel WHERE id NOT IN (
     SELECT MIN(id) FROM personnel GROUP BY name, salary, sgk_cost
   )`);
+}
+
+// ===== ML: Simple Ridge Regression for expected customers (transactions) =====
+function getDailyAggregates(callback) {
+  const sql = `SELECT date(order_date) AS d,
+                      COUNT(DISTINCT id) AS transactions,
+                      COALESCE((SELECT SUM(oi.quantity) FROM order_items oi JOIN orders o2 ON oi.order_id = o2.id WHERE date(o2.order_date) = date(o.order_date)), 0) AS items
+               FROM orders o
+               GROUP BY date(order_date)
+               ORDER BY date(order_date)`;
+  db.all(sql, [], (err, rows) => {
+    if (err) return callback(err);
+    const list = (rows || []).map(r => ({ date: r.d, transactions: Number(r.transactions || 0), items: Number(r.items || 0) }));
+    callback(null, list);
+  });
+}
+
+function oneHot(index, length) {
+  const v = Array.from({ length }, () => 0);
+  if (index >= 0 && index < length) v[index] = 1;
+  return v;
+}
+
+function buildDailyDataset(days) {
+  // days: [{date, transactions}...] sorted ASC by date
+  const map = new Map(days.map(d => [d.date, d]));
+  const getTx = (dateStr) => (map.get(dateStr)?.transactions ?? null);
+
+  const toISO = (d) => new Date(d).toISOString().split('T')[0];
+  const addDays = (dStr, n) => { const d = new Date(dStr + 'T00:00:00'); d.setDate(d.getDate() + n); return toISO(d); };
+
+  const rows = [];
+  for (let i = 0; i < days.length; i++) {
+    const cur = days[i];
+    const prev1Date = addDays(cur.date, -1);
+    const prev7Date = addDays(cur.date, -7);
+    const prev1 = getTx(prev1Date);
+    const prev7 = getTx(prev7Date);
+    if (prev1 == null || prev7 == null) continue; // need basic lags
+
+    // rolling averages
+    let ma3 = 0, ma7 = 0, c3 = 0, c7 = 0;
+    for (let k = 1; k <= 7; k++) {
+      const tx = getTx(addDays(cur.date, -k));
+      if (tx != null) {
+        ma7 += tx; c7++;
+        if (k <= 3) { ma3 += tx; c3++; }
+      }
+    }
+    if (c3 === 0 || c7 === 0) continue;
+    ma3 /= c3; ma7 /= c7;
+
+    const dt = new Date(cur.date + 'T00:00:00');
+    const dow = dt.getDay(); // 0..6
+    const month = dt.getMonth(); // 0..11
+
+    const features = [
+      1, // intercept
+      ...oneHot(dow, 7),
+      ...oneHot(month, 12),
+      prev1,
+      prev7,
+      ma3,
+      ma7,
+    ];
+    rows.push({ x: features, y: cur.transactions });
+  }
+
+  if (!rows.length) {
+    return { X: [], y: [], featureCount: 0 };
+  }
+  const featureCount = rows[0].x.length;
+  const X = rows.map(r => r.x);
+  const y = rows.map(r => r.y);
+  return { X, y, featureCount };
+}
+
+function transpose(A) { return A[0].map((_, i) => A.map(row => row[i])); }
+function matMul(A, B) {
+  const rows = A.length, cols = B[0].length, inner = B.length;
+  const out = Array.from({ length: rows }, () => Array(cols).fill(0));
+  for (let i = 0; i < rows; i++) {
+    for (let k = 0; k < inner; k++) {
+      const aik = A[i][k];
+      for (let j = 0; j < cols; j++) {
+        out[i][j] += aik * B[k][j];
+      }
+    }
+  }
+  return out;
+}
+function identity(n) { const I = Array.from({ length: n }, () => Array(n).fill(0)); for (let i = 0; i < n; i++) I[i][i] = 1; return I; }
+function clone2D(A) { return A.map(r => r.slice()); }
+
+function invertMatrix(M) {
+  const n = M.length;
+  const A = clone2D(M);
+  const I = identity(n);
+  for (let i = 0; i < n; i++) {
+    // pivot
+    let pivot = A[i][i];
+    let pivotRow = i;
+    for (let r = i + 1; r < n; r++) {
+      if (Math.abs(A[r][i]) > Math.abs(pivot)) { pivot = A[r][i]; pivotRow = r; }
+    }
+    if (Math.abs(pivot) < 1e-8) return null; // singular
+    if (pivotRow !== i) { const tmp = A[i]; A[i] = A[pivotRow]; A[pivotRow] = tmp; const tmpI = I[i]; I[i] = I[pivotRow]; I[pivotRow] = tmpI; }
+    // normalize
+    const invPivot = 1 / A[i][i];
+    for (let j = 0; j < n; j++) { A[i][j] *= invPivot; I[i][j] *= invPivot; }
+    // eliminate
+    for (let r = 0; r < n; r++) {
+      if (r === i) continue;
+      const factor = A[r][i];
+      if (factor === 0) continue;
+      for (let j = 0; j < n; j++) {
+        A[r][j] -= factor * A[i][j];
+        I[r][j] -= factor * I[i][j];
+      }
+    }
+  }
+  return I;
+}
+
+function ridgeRegression(X, y, lambda = 1.0) {
+  const n = X.length; if (!n) return null;
+  const p = X[0].length;
+  const XT = transpose(X);
+  const XTX = matMul(XT, X);
+  for (let i = 0; i < p; i++) { XTX[i][i] += lambda; }
+  const inv = invertMatrix(XTX);
+  if (!inv) return null;
+  const XTy = matMul(XT, y.map(v => [v]));
+  const beta = matMul(inv, XTy).map(row => row[0]);
+  // metrics
+  const preds = X.map((row) => row.reduce((s, v, i) => s + v * beta[i], 0));
+  const err = preds.map((p, i) => p - y[i]);
+  const mse = err.reduce((a, e) => a + e * e, 0) / n;
+  const mae = err.reduce((a, e) => a + Math.abs(e), 0) / n;
+  return { beta, lambda, mse, mae, samples: n };
+}
+
+function saveModel(name, payload, callback) {
+  const version = 1;
+  const meta = JSON.stringify({ type: 'ridge_regression_daily', version, stats: { mse: payload.mse, mae: payload.mae, samples: payload.samples } });
+  const coefficients = JSON.stringify({ beta: payload.beta, lambda: payload.lambda });
+  db.run(`INSERT INTO ml_models (name, version, trained_at, meta, coefficients)
+          VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?)
+          ON CONFLICT(name) DO UPDATE SET version=excluded.version, trained_at=CURRENT_TIMESTAMP, meta=excluded.meta, coefficients=excluded.coefficients`,
+    [name, version, meta, coefficients], (err) => callback && callback(err));
+}
+
+function loadModel(name, callback) {
+  db.get('SELECT * FROM ml_models WHERE name = ?', [name], (err, row) => {
+    if (err) return callback(err);
+    if (!row) return callback(null, null);
+    try {
+      const meta = row.meta ? JSON.parse(row.meta) : {};
+      const coeff = row.coefficients ? JSON.parse(row.coefficients) : {};
+      callback(null, { name: row.name, version: row.version, trained_at: row.trained_at, meta, coefficients: coeff });
+    } catch (e) {
+      callback(e);
+    }
+  });
+}
+
+function trainForecastModel(callback) {
+  getDailyAggregates((err, days) => {
+    if (err) return callback && callback(err);
+    const { X, y } = buildDailyDataset(days);
+    if (!X.length) return callback && callback(new Error('insufficient-data'));
+    const model = ridgeRegression(X, y, 5.0);
+    if (!model) return callback && callback(new Error('training-failed'));
+    saveModel('expected_customers_daily_v1', model, (saveErr) => {
+      if (callback) callback(saveErr, model);
+    });
+  });
+}
+
+function predictTomorrowCustomers(callback) {
+  // Build features for tomorrow using latest aggregates
+  getDailyAggregates((err, days) => {
+    if (err) return callback(err);
+    if (!days.length) return callback(null, 0);
+    loadModel('expected_customers_daily_v1', (mErr, model) => {
+      if (mErr) return callback(mErr);
+      if (!model || !model.coefficients || !Array.isArray(model.coefficients.beta)) {
+        // fallback: average last 4 weeks
+        const avg = days.slice(-28).reduce((a, r) => a + (r.transactions || 0), 0) / Math.max(1, Math.min(28, days.length));
+        return callback(null, Math.round(avg));
+      }
+      const beta = model.coefficients.beta;
+      const toISO = (d) => new Date(d).toISOString().split('T')[0];
+      const addDays = (dStr, n) => { const d = new Date(dStr + 'T00:00:00'); d.setDate(d.getDate() + n); return toISO(d); };
+      const lastDate = days[days.length - 1].date;
+      const tomorrow = addDays(lastDate, 1);
+      const map = new Map(days.map(d => [d.date, d.transactions]));
+      const prev1 = map.get(addDays(tomorrow, -1)) ?? null;
+      const prev7 = map.get(addDays(tomorrow, -7)) ?? null;
+      let ma3 = 0, ma7 = 0, c3 = 0, c7 = 0;
+      for (let k = 1; k <= 7; k++) {
+        const v = map.get(addDays(tomorrow, -k));
+        if (v != null) { ma7 += v; c7++; if (k <= 3) { ma3 += v; c3++; } }
+      }
+      if (prev1 == null || prev7 == null || c3 === 0 || c7 === 0) {
+        const avg = days.slice(-28).reduce((a, r) => a + (r.transactions || 0), 0) / Math.max(1, Math.min(28, days.length));
+        return callback(null, Math.round(avg));
+      }
+      ma3 /= c3; ma7 /= c7;
+      const dt = new Date(tomorrow + 'T00:00:00');
+      const dow = dt.getDay();
+      const month = dt.getMonth();
+      const x = [1, ...oneHot(dow, 7), ...oneHot(month, 12), prev1, prev7, ma3, ma7];
+      const yhat = x.reduce((s, v, i) => s + v * beta[i], 0);
+      const clamped = Math.max(0, Math.round(yhat));
+      callback(null, clamped);
+    });
+  });
+}
+
+// Debounced training trigger for frequent order updates
+let __trainTimer = null;
+function scheduleTrain() {
+  try {
+    if (__trainTimer) clearTimeout(__trainTimer);
+    __trainTimer = setTimeout(() => trainForecastModel(() => {}), 60 * 1000);
+  } catch (e) {
+    // ignore
+  }
 }
 
 function normalizeMonthYear(monthInput, yearInput) {
@@ -1325,6 +1570,7 @@ app.put('/api/orders/:id', (req, res) => {
           return res.status(500).json({ error: err.message });
         }
         res.json({ message: 'Order updated successfully' });
+        scheduleTrain();
       });
   });
 });
@@ -1555,6 +1801,8 @@ function updateOrderTotal(orderId) {
     
     const total = result.total || 0;
     db.run('UPDATE orders SET total_amount = ? WHERE id = ?', [total, orderId]);
+    // Debounced model retrain after order total changes
+    scheduleTrain();
   });
 }
 
@@ -1568,6 +1816,47 @@ app.get('/api/daily-revenue', (req, res) => {
     }
     res.json({ daily_revenue: (row && row.daily_revenue) ? row.daily_revenue : 0 });
   });
+});
+
+// POS layout settings (global)
+app.get('/api/pos-layout', (req, res) => {
+  db.get('SELECT value FROM app_settings WHERE key = ?', ['pos_layout'], (err, row) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    if (!row || !row.value) {
+      return res.json({ positionsLocked: true, productOrder: {}, categoryOrder: [] });
+    }
+    try {
+      const parsed = JSON.parse(row.value);
+      res.json({
+        positionsLocked: Boolean(parsed.positionsLocked),
+        productOrder: parsed.productOrder && typeof parsed.productOrder === 'object' ? parsed.productOrder : {},
+        categoryOrder: Array.isArray(parsed.categoryOrder) ? parsed.categoryOrder : [],
+      });
+    } catch (e) {
+      res.status(500).json({ error: 'invalid-layout-json' });
+    }
+  });
+});
+
+app.put('/api/pos-layout', express.json(), (req, res) => {
+  const payload = req.body || {};
+  const positionsLocked = Boolean(payload.positionsLocked);
+  const productOrder = payload.productOrder && typeof payload.productOrder === 'object' ? payload.productOrder : {};
+  const categoryOrder = Array.isArray(payload.categoryOrder) ? payload.categoryOrder : [];
+  const value = JSON.stringify({ positionsLocked, productOrder, categoryOrder });
+  db.run(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES ('pos_layout', ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`,
+    [value],
+    function(err) {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      res.json({ success: true });
+    }
+  );
 });
 
 // Analytics: Daily summary (hourly breakdown)
@@ -1766,31 +2055,59 @@ app.get('/api/analytics/forecast', authenticateToken, (req, res) => {
       const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
       const tomorrowDow = tomorrow.getUTCDay();
       const tomorrowDates = (byDayRows || []).filter(r => new Date(r.d + 'T00:00:00Z').getUTCDay() === tomorrowDow);
-      const expectedCustomersTomorrow = tomorrowDates.length
-        ? Math.round(tomorrowDates.reduce((a, r) => a + Number(r.transactions || 0), 0) / tomorrowDates.length)
-        : 0;
+      // Use trained model for expected customers if available; fallback to simple avg
+      const useModel = (cb) => {
+        predictTomorrowCustomers((predErr, val) => {
+          if (predErr) {
+            const fallback = tomorrowDates.length
+              ? Math.round(tomorrowDates.reduce((a, r) => a + Number(r.transactions || 0), 0) / tomorrowDates.length)
+              : 0;
+            return cb(fallback);
+          }
+          cb(val);
+        });
+      };
 
-      // Pick the 2-hour window with the highest expected items
-      const dowMatrix = matrix[tomorrowDow] || [];
-      let bestStart = 10;
-      let bestScore = -1;
-      for (let h = 0; h < 23; h++) {
-        const score = (dowMatrix[h] || 0) + (dowMatrix[h + 1] || 0);
-        if (score > bestScore) {
-          bestScore = score;
-          bestStart = h;
+      useModel((expectedCustomersTomorrow) => {
+        // Pick the 2-hour window with the highest expected items
+        const dowMatrix = matrix[tomorrowDow] || [];
+        let bestStart = 10;
+        let bestScore = -1;
+        for (let h = 0; h < 23; h++) {
+          const score = (dowMatrix[h] || 0) + (dowMatrix[h + 1] || 0);
+          if (score > bestScore) {
+            bestScore = score;
+            bestStart = h;
+          }
         }
-      }
-      const pad = (n) => String(n).padStart(2, '0');
-      const rec = `Expect ${(bestScore > 0 ? 'higher' : 'low')} traffic between ${pad(bestStart)}:00–${pad((bestStart + 2) % 24)}:00.`;
+        const pad = (n) => String(n).padStart(2, '0');
+        const rec = `Expect ${(bestScore > 0 ? 'higher' : 'low')} traffic between ${pad(bestStart)}:00–${pad((bestStart + 2) % 24)}:00.`;
 
-      res.json({
-        window: { start: startParam, end: endParam, days },
-        hourlyHeatmap: matrix, // 0=Sunday..6=Saturday, each with 24-hour averages (items)
-        expectedCustomersTomorrow,
-        staffingRecommendation: rec,
+        res.json({
+          window: { start: startParam, end: endParam, days },
+          hourlyHeatmap: matrix, // 0=Sunday..6=Saturday, each with 24-hour averages (items)
+          expectedCustomersTomorrow,
+          staffingRecommendation: rec,
+        });
       });
     });
+  });
+});
+
+// Trigger model training on demand
+app.post('/api/analytics/train', authenticateToken, (req, res) => {
+  trainForecastModel((err, model) => {
+    if (err) return res.status(500).json({ error: err.message || String(err) });
+    res.json({ message: 'trained', stats: { mse: model.mse, mae: model.mae, samples: model.samples } });
+  });
+});
+
+// Return current model metadata
+app.get('/api/analytics/model', authenticateToken, (req, res) => {
+  loadModel('expected_customers_daily_v1', (err, model) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!model) return res.json(null);
+    res.json(model);
   });
 });
 
@@ -1814,6 +2131,29 @@ app.get('/api/daily-closings', authenticateToken, (req, res) => {
       return res.status(500).json({ error: err.message });
     }
     res.json(rows);
+  });
+});
+
+// Cleanup daily closings for a given period (month/year or start/end)
+app.post('/api/daily-closings/cleanup', authenticateToken, (req, res) => {
+  const body = req.body || {};
+  const { month, year, start, end } = body;
+  let sql = '';
+  let params = [];
+  if (month && year) {
+    sql = 'DELETE FROM daily_closings WHERE strftime("%m", closing_date) = ? AND strftime("%Y", closing_date) = ?';
+    params = [String(month).padStart(2, '0'), String(year)];
+  } else if (start && end) {
+    sql = 'DELETE FROM daily_closings WHERE date(closing_date) BETWEEN date(?) AND date(?)';
+    params = [start, end];
+  } else {
+    return res.status(400).json({ error: 'invalid-range' });
+  }
+  db.run(sql, params, function(err) {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json({ deleted: this.changes || 0 });
   });
 });
 
@@ -1855,6 +2195,13 @@ app.use((err, req, res, next) => {
 // Start server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  // Kick off initial model training and periodic retraining (hourly)
+  try {
+    setTimeout(() => trainForecastModel(() => {}), 5000);
+    setInterval(() => trainForecastModel(() => {}), 60 * 60 * 1000);
+  } catch (e) {
+    // ignore training scheduling errors
+  }
 });
 
 // Graceful shutdown

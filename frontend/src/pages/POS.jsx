@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Settings, ShoppingCart } from 'lucide-react';
 import { formatCurrency } from '../utils/format.js';
-import { getApiBase } from '../utils/api.js';
+import { getApiBase, authHeaders } from '../utils/api.js';
 
 const API_BASE = getApiBase();
 
@@ -41,49 +41,46 @@ export default function POS({ onAdminClick, onOrderClosed }) {
     fetchProducts();
   }, []);
 
+  // Load POS layout from backend
   useEffect(() => {
-    try {
-      const storedLock = localStorage.getItem('posPositionsLocked');
-      if (storedLock !== null) {
-        setPositionsLocked(JSON.parse(storedLock));
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/pos-layout`);
+        if (res.ok) {
+          const data = await res.json();
+          if (typeof data.positionsLocked === 'boolean') setPositionsLocked(data.positionsLocked);
+          if (data.productOrder && typeof data.productOrder === 'object') setProductOrder(data.productOrder);
+          if (Array.isArray(data.categoryOrder)) setCategoryOrder(data.categoryOrder);
+        }
+      } catch (e) {
+        console.error(e);
       }
-      const storedOrder = localStorage.getItem('posProductOrder');
-      if (storedOrder) {
-        setProductOrder(JSON.parse(storedOrder));
-      }
-      const storedCategories = localStorage.getItem('posCategoryOrder');
-      if (storedCategories) {
-        setCategoryOrder(JSON.parse(storedCategories));
-      }
-    } catch (error) {
-      console.error(error);
-    }
+    })();
   }, []);
 
+  // Persist POS layout to backend (debounced)
+  const layoutSaveTimer = useRef(null);
   useEffect(() => {
     try {
-      localStorage.setItem('posPositionsLocked', JSON.stringify(positionsLocked));
+      if (layoutSaveTimer.current) clearTimeout(layoutSaveTimer.current);
+      layoutSaveTimer.current = setTimeout(async () => {
+        try {
+          await fetch(`${API_BASE}/pos-layout`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json', ...authHeaders() },
+            body: JSON.stringify({ positionsLocked, productOrder, categoryOrder }),
+          });
+        } catch (e) {
+          console.error(e);
+        }
+      }, 400);
     } catch (error) {
       console.error(error);
     }
-  }, [positionsLocked]);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('posProductOrder', JSON.stringify(productOrder));
-    } catch (error) {
-      console.error(error);
-    }
-  }, [productOrder]);
-
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('posCategoryOrder', JSON.stringify(categoryOrder));
-    } catch (error) {
-      console.error(error);
-    }
-  }, [categoryOrder]);
+    return () => {
+      if (layoutSaveTimer.current) clearTimeout(layoutSaveTimer.current);
+    };
+  }, [positionsLocked, productOrder, categoryOrder]);
 
   useEffect(() => {
     if (!selectionMode) {

@@ -246,7 +246,11 @@ export default function PerformansTakibi() {
 
   const pieSlices = useMemo(() => {
     const palette = ['#2563eb', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#14b8a6', '#f97316'];
-    return (weekly.revenueDistribution || []).map((it, idx) => ({ label: it.date.slice(5), value: Number(it.pct || 0), color: palette[idx % palette.length] }));
+    return (weekly.revenueDistribution || []).map((it, idx) => {
+      const dt = new Date(it.date + 'T00:00:00');
+      const day = dayNames[dt.getDay()];
+      return { label: `${it.date.slice(5)} - ${day}`, value: Number(it.pct || 0), color: palette[idx % palette.length] };
+    });
   }, [weekly.revenueDistribution]);
 
   const summaryCards = [
