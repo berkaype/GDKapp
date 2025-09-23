@@ -4,25 +4,7 @@ const cors = require('cors');
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const path = require('path');
-const fs = require('fs');
 require('dotenv').config();
-
-const isPkg = typeof process.pkg !== 'undefined';
-const executableDir = isPkg ? path.dirname(process.execPath) : __dirname;
-const dataDir = isPkg ? path.join(executableDir, 'data') : __dirname;
-
-if (isPkg && !fs.existsSync(dataDir)) {
-  fs.mkdirSync(dataDir, { recursive: true });
-}
-
-const bundledDbPath = path.join(__dirname, 'bufe.db');
-const dbPath = isPkg ? path.join(dataDir, 'bufe.db') : bundledDbPath;
-
-if (isPkg && !fs.existsSync(dbPath) && fs.existsSync(bundledDbPath)) {
-  fs.copyFileSync(bundledDbPath, dbPath);
-}
-
-const publicDir = path.join(__dirname, 'public');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -31,10 +13,10 @@ const JWT_SECRET = process.env.JWT_SECRET || 'bufe_secret_key_2024';
 // Middleware
 app.use(cors());
 app.use(express.json());
-app.use(express.static(publicDir));
+app.use(express.static('public'));
 
 // Database initialization
-const db = new sqlite3.Database(dbPath, (err) => {
+const db = new sqlite3.Database('./bufe.db', (err) => {
   if (err) {
     console.error('Error opening database:', err);
   } else {
@@ -65,21 +47,6 @@ function initializeDatabase() {
     is_active BOOLEAN DEFAULT 1,
     created_date DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
-
-  // Personnel wages table to keep month based history
-  db.run(`CREATE TABLE IF NOT EXISTS personnel_wages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    personnel_id INTEGER NOT NULL,
-    month INTEGER NOT NULL,
-    year INTEGER NOT NULL,
-    salary REAL NOT NULL,
-    sgk_cost REAL NOT NULL,
-    created_date DATETIME DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(personnel_id, year, month),
-    FOREIGN KEY (personnel_id) REFERENCES personnel(id) ON DELETE CASCADE
-  )`);
-  db.run('CREATE INDEX IF NOT EXISTS idx_personnel_wages_personnel ON personnel_wages(personnel_id)');
-  db.run('CREATE INDEX IF NOT EXISTS idx_personnel_wages_period ON personnel_wages(year, month)');
 
   // Business expenses table
   db.run(`CREATE TABLE IF NOT EXISTS business_expenses (
@@ -172,22 +139,6 @@ function initializeDatabase() {
     FOREIGN KEY (stock_code_id) REFERENCES stock_codes(id)
   )`);
 
-  // App settings (key-value JSON store)
-  db.run(`CREATE TABLE IF NOT EXISTS app_settings (
-    key TEXT PRIMARY KEY,
-    value TEXT,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )`);
-
-  // ML models table (store simple regression models and metadata)
-  db.run(`CREATE TABLE IF NOT EXISTS ml_models (
-    name TEXT PRIMARY KEY,
-    version INTEGER NOT NULL,
-    trained_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    meta TEXT,
-    coefficients TEXT
-  )`);
-
   // Insert default admin user
   const hashedPassword = bcrypt.hashSync('admin', 10);
   db.run(`INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)`, 
@@ -220,29 +171,6 @@ function initializeDatabase() {
       stmt.run(person);
     });
     stmt.finalize();
-  });
-
-  seedTableIfEmpty('personnel_wages', () => {
-    db.all('SELECT id, salary, sgk_cost FROM personnel', (err, people) => {
-      if (err) {
-        console.error('Error seeding personnel wages:', err);
-        return;
-      }
-      if (!people || people.length === 0) {
-        return;
-      }
-      const now = new Date();
-      const seedMonth = now.getMonth() + 1;
-      const seedYear = now.getFullYear();
-      const stmt = db.prepare('INSERT OR IGNORE INTO personnel_wages (personnel_id, month, year, salary, sgk_cost) VALUES (?, ?, ?, ?, ?)');
-      people.forEach((person) => {
-        if (person.salary == null || person.sgk_cost == null) {
-          return;
-        }
-        stmt.run(person.id, seedMonth, seedYear, person.salary, person.sgk_cost);
-      });
-      stmt.finalize();
-    });
   });
 
   // Insert initial stock codes
@@ -323,309 +251,6 @@ function cleanupDuplicates() {
   )`);
 }
 
-// ===== ML: Simple Ridge Regression for expected customers (transactions) =====
-function getDailyAggregates(callback) {
-  const sql = `SELECT date(order_date) AS d,
-                      COUNT(DISTINCT id) AS transactions,
-                      COALESCE((SELECT SUM(oi.quantity) FROM order_items oi JOIN orders o2 ON oi.order_id = o2.id WHERE date(o2.order_date) = date(o.order_date)), 0) AS items
-               FROM orders o
-               GROUP BY date(order_date)
-               ORDER BY date(order_date)`;
-  db.all(sql, [], (err, rows) => {
-    if (err) return callback(err);
-    const list = (rows || []).map(r => ({ date: r.d, transactions: Number(r.transactions || 0), items: Number(r.items || 0) }));
-    callback(null, list);
-  });
-}
-
-function oneHot(index, length) {
-  const v = Array.from({ length }, () => 0);
-  if (index >= 0 && index < length) v[index] = 1;
-  return v;
-}
-
-function buildDailyDataset(days) {
-  // days: [{date, transactions}...] sorted ASC by date
-  const map = new Map(days.map(d => [d.date, d]));
-  const getTx = (dateStr) => (map.get(dateStr)?.transactions ?? null);
-
-  const toISO = (d) => new Date(d).toISOString().split('T')[0];
-  const addDays = (dStr, n) => { const d = new Date(dStr + 'T00:00:00'); d.setDate(d.getDate() + n); return toISO(d); };
-
-  const rows = [];
-  for (let i = 0; i < days.length; i++) {
-    const cur = days[i];
-    const prev1Date = addDays(cur.date, -1);
-    const prev7Date = addDays(cur.date, -7);
-    const prev1 = getTx(prev1Date);
-    const prev7 = getTx(prev7Date);
-    if (prev1 == null || prev7 == null) continue; // need basic lags
-
-    // rolling averages
-    let ma3 = 0, ma7 = 0, c3 = 0, c7 = 0;
-    for (let k = 1; k <= 7; k++) {
-      const tx = getTx(addDays(cur.date, -k));
-      if (tx != null) {
-        ma7 += tx; c7++;
-        if (k <= 3) { ma3 += tx; c3++; }
-      }
-    }
-    if (c3 === 0 || c7 === 0) continue;
-    ma3 /= c3; ma7 /= c7;
-
-    const dt = new Date(cur.date + 'T00:00:00');
-    const dow = dt.getDay(); // 0..6
-    const month = dt.getMonth(); // 0..11
-
-    const features = [
-      1, // intercept
-      ...oneHot(dow, 7),
-      ...oneHot(month, 12),
-      prev1,
-      prev7,
-      ma3,
-      ma7,
-    ];
-    rows.push({ x: features, y: cur.transactions });
-  }
-
-  if (!rows.length) {
-    return { X: [], y: [], featureCount: 0 };
-  }
-  const featureCount = rows[0].x.length;
-  const X = rows.map(r => r.x);
-  const y = rows.map(r => r.y);
-  return { X, y, featureCount };
-}
-
-function transpose(A) { return A[0].map((_, i) => A.map(row => row[i])); }
-function matMul(A, B) {
-  const rows = A.length, cols = B[0].length, inner = B.length;
-  const out = Array.from({ length: rows }, () => Array(cols).fill(0));
-  for (let i = 0; i < rows; i++) {
-    for (let k = 0; k < inner; k++) {
-      const aik = A[i][k];
-      for (let j = 0; j < cols; j++) {
-        out[i][j] += aik * B[k][j];
-      }
-    }
-  }
-  return out;
-}
-function identity(n) { const I = Array.from({ length: n }, () => Array(n).fill(0)); for (let i = 0; i < n; i++) I[i][i] = 1; return I; }
-function clone2D(A) { return A.map(r => r.slice()); }
-
-function invertMatrix(M) {
-  const n = M.length;
-  const A = clone2D(M);
-  const I = identity(n);
-  for (let i = 0; i < n; i++) {
-    // pivot
-    let pivot = A[i][i];
-    let pivotRow = i;
-    for (let r = i + 1; r < n; r++) {
-      if (Math.abs(A[r][i]) > Math.abs(pivot)) { pivot = A[r][i]; pivotRow = r; }
-    }
-    if (Math.abs(pivot) < 1e-8) return null; // singular
-    if (pivotRow !== i) { const tmp = A[i]; A[i] = A[pivotRow]; A[pivotRow] = tmp; const tmpI = I[i]; I[i] = I[pivotRow]; I[pivotRow] = tmpI; }
-    // normalize
-    const invPivot = 1 / A[i][i];
-    for (let j = 0; j < n; j++) { A[i][j] *= invPivot; I[i][j] *= invPivot; }
-    // eliminate
-    for (let r = 0; r < n; r++) {
-      if (r === i) continue;
-      const factor = A[r][i];
-      if (factor === 0) continue;
-      for (let j = 0; j < n; j++) {
-        A[r][j] -= factor * A[i][j];
-        I[r][j] -= factor * I[i][j];
-      }
-    }
-  }
-  return I;
-}
-
-function ridgeRegression(X, y, lambda = 1.0) {
-  const n = X.length; if (!n) return null;
-  const p = X[0].length;
-  const XT = transpose(X);
-  const XTX = matMul(XT, X);
-  for (let i = 0; i < p; i++) { XTX[i][i] += lambda; }
-  const inv = invertMatrix(XTX);
-  if (!inv) return null;
-  const XTy = matMul(XT, y.map(v => [v]));
-  const beta = matMul(inv, XTy).map(row => row[0]);
-  // metrics
-  const preds = X.map((row) => row.reduce((s, v, i) => s + v * beta[i], 0));
-  const err = preds.map((p, i) => p - y[i]);
-  const mse = err.reduce((a, e) => a + e * e, 0) / n;
-  const mae = err.reduce((a, e) => a + Math.abs(e), 0) / n;
-  return { beta, lambda, mse, mae, samples: n };
-}
-
-function saveModel(name, payload, callback) {
-  const version = 1;
-  const meta = JSON.stringify({ type: 'ridge_regression_daily', version, stats: { mse: payload.mse, mae: payload.mae, samples: payload.samples } });
-  const coefficients = JSON.stringify({ beta: payload.beta, lambda: payload.lambda });
-  db.run(`INSERT INTO ml_models (name, version, trained_at, meta, coefficients)
-          VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?)
-          ON CONFLICT(name) DO UPDATE SET version=excluded.version, trained_at=CURRENT_TIMESTAMP, meta=excluded.meta, coefficients=excluded.coefficients`,
-    [name, version, meta, coefficients], (err) => callback && callback(err));
-}
-
-function loadModel(name, callback) {
-  db.get('SELECT * FROM ml_models WHERE name = ?', [name], (err, row) => {
-    if (err) return callback(err);
-    if (!row) return callback(null, null);
-    try {
-      const meta = row.meta ? JSON.parse(row.meta) : {};
-      const coeff = row.coefficients ? JSON.parse(row.coefficients) : {};
-      callback(null, { name: row.name, version: row.version, trained_at: row.trained_at, meta, coefficients: coeff });
-    } catch (e) {
-      callback(e);
-    }
-  });
-}
-
-function trainForecastModel(callback) {
-  getDailyAggregates((err, days) => {
-    if (err) return callback && callback(err);
-    const { X, y } = buildDailyDataset(days);
-    if (!X.length) return callback && callback(new Error('insufficient-data'));
-    const model = ridgeRegression(X, y, 5.0);
-    if (!model) return callback && callback(new Error('training-failed'));
-    saveModel('expected_customers_daily_v1', model, (saveErr) => {
-      if (callback) callback(saveErr, model);
-    });
-  });
-}
-
-function predictTomorrowCustomers(callback) {
-  // Build features for tomorrow using latest aggregates
-  getDailyAggregates((err, days) => {
-    if (err) return callback(err);
-    if (!days.length) return callback(null, 0);
-    loadModel('expected_customers_daily_v1', (mErr, model) => {
-      if (mErr) return callback(mErr);
-      if (!model || !model.coefficients || !Array.isArray(model.coefficients.beta)) {
-        // fallback: average last 4 weeks
-        const avg = days.slice(-28).reduce((a, r) => a + (r.transactions || 0), 0) / Math.max(1, Math.min(28, days.length));
-        return callback(null, Math.round(avg));
-      }
-      const beta = model.coefficients.beta;
-      const toISO = (d) => new Date(d).toISOString().split('T')[0];
-      const addDays = (dStr, n) => { const d = new Date(dStr + 'T00:00:00'); d.setDate(d.getDate() + n); return toISO(d); };
-      const lastDate = days[days.length - 1].date;
-      const tomorrow = addDays(lastDate, 1);
-      const map = new Map(days.map(d => [d.date, d.transactions]));
-      const prev1 = map.get(addDays(tomorrow, -1)) ?? null;
-      const prev7 = map.get(addDays(tomorrow, -7)) ?? null;
-      let ma3 = 0, ma7 = 0, c3 = 0, c7 = 0;
-      for (let k = 1; k <= 7; k++) {
-        const v = map.get(addDays(tomorrow, -k));
-        if (v != null) { ma7 += v; c7++; if (k <= 3) { ma3 += v; c3++; } }
-      }
-      if (prev1 == null || prev7 == null || c3 === 0 || c7 === 0) {
-        const avg = days.slice(-28).reduce((a, r) => a + (r.transactions || 0), 0) / Math.max(1, Math.min(28, days.length));
-        return callback(null, Math.round(avg));
-      }
-      ma3 /= c3; ma7 /= c7;
-      const dt = new Date(tomorrow + 'T00:00:00');
-      const dow = dt.getDay();
-      const month = dt.getMonth();
-      const x = [1, ...oneHot(dow, 7), ...oneHot(month, 12), prev1, prev7, ma3, ma7];
-      const yhat = x.reduce((s, v, i) => s + v * beta[i], 0);
-      const clamped = Math.max(0, Math.round(yhat));
-      callback(null, clamped);
-    });
-  });
-}
-
-// Debounced training trigger for frequent order updates
-let __trainTimer = null;
-function scheduleTrain() {
-  try {
-    if (__trainTimer) clearTimeout(__trainTimer);
-    __trainTimer = setTimeout(() => trainForecastModel(() => {}), 60 * 1000);
-  } catch (e) {
-    // ignore
-  }
-}
-
-function normalizeMonthYear(monthInput, yearInput) {
-  const now = new Date();
-  let month = Number(monthInput);
-  let year = Number(yearInput);
-  if (!Number.isInteger(month) || month < 1 || month > 12) {
-    month = now.getMonth() + 1;
-  }
-  if (!Number.isInteger(year) || year < 1970) {
-    year = now.getFullYear();
-  }
-  return { month, year };
-}
-
-function buildPersonnelResponse(personnelRows, wageRows, targetMonth, targetYear) {
-  const wageMap = new Map();
-  wageRows.forEach((row) => {
-    if (!wageMap.has(row.personnel_id)) {
-      wageMap.set(row.personnel_id, []);
-    }
-    wageMap.get(row.personnel_id).push(row);
-  });
-  wageMap.forEach((list) => {
-    list.sort((a, b) => {
-      if (a.year === b.year) {
-        return a.month - b.month;
-      }
-      return a.year - b.year;
-    });
-  });
-  return personnelRows
-    .filter((row) => row.is_active !== 0)
-    .map((person) => {
-      const entries = wageMap.get(person.id) || [];
-      const direct = entries.find((entry) => entry.year === targetYear && entry.month === targetMonth);
-      const latest = entries.length > 0 ? entries[entries.length - 1] : null;
-      const wage = direct || latest;
-      const salary = wage ? Number(wage.salary) : Number(person.salary);
-      const sgk = wage ? Number(wage.sgk_cost) : Number(person.sgk_cost);
-      return {
-        id: person.id,
-        name: person.name,
-        salary: Number.isFinite(salary) ? salary : 0,
-        sgk_cost: Number.isFinite(sgk) ? sgk : 0,
-        source_month: wage ? wage.month : null,
-        source_year: wage ? wage.year : null,
-        is_inherited: Boolean(!direct && wage),
-      };
-    });
-}
-
-function syncLatestPersonnelWage(personnelId, callback) {
-  db.get(
-    'SELECT salary, sgk_cost FROM personnel_wages WHERE personnel_id = ? ORDER BY year DESC, month DESC LIMIT 1',
-    [personnelId],
-    (err, row) => {
-      if (err) {
-        if (callback) callback(err);
-        return;
-      }
-      if (!row) {
-        if (callback) callback(null);
-        return;
-      }
-      db.run(
-        'UPDATE personnel SET salary = ?, sgk_cost = ? WHERE id = ?',
-        [row.salary, row.sgk_cost, personnelId],
-        (updateErr) => {
-          if (callback) callback(updateErr);
-        },
-      );
-    },
-  );
-}
-
 // Middleware for authentication
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
@@ -662,157 +287,35 @@ app.post('/api/login', (req, res) => {
 
 // Personnel Routes
 app.get('/api/personnel', authenticateToken, (req, res) => {
-  const { month: monthParam, year: yearParam } = req.query;
-  const { month, year } = normalizeMonthYear(monthParam, yearParam);
-
-  db.all('SELECT * FROM personnel WHERE is_active = 1 ORDER BY name', (err, personnelRows) => {
+  db.all('SELECT * FROM personnel WHERE is_active = 1 ORDER BY name', (err, rows) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
-
-    db.all(
-      'SELECT personnel_id, month, year, salary, sgk_cost FROM personnel_wages WHERE (year < ? OR (year = ? AND month <= ?)) ORDER BY year, month',
-      [year, year, month],
-      (wErr, wageRows) => {
-        if (wErr) {
-          return res.status(500).json({ error: wErr.message });
-        }
-
-        db.all(
-          'SELECT DISTINCT year, month FROM personnel_wages ORDER BY year DESC, month DESC',
-          [],
-          (pErr, periodRows) => {
-            if (pErr) {
-              return res.status(500).json({ error: pErr.message });
-            }
-
-            const rows = buildPersonnelResponse(personnelRows, wageRows, month, year);
-            const availablePeriods = periodRows.map((row) => ({ year: row.year, month: row.month }));
-            const hasRequested = availablePeriods.some((period) => period.year === year && period.month === month);
-            if (!hasRequested) {
-              availablePeriods.push({ year, month });
-            }
-            availablePeriods.sort((a, b) => {
-              if (a.year === b.year) {
-                return b.month - a.month;
-              }
-              return b.year - a.year;
-            });
-
-            res.json({
-              period: { month, year },
-              rows,
-              availablePeriods,
-            });
-          },
-        );
-      },
-    );
+    res.json(rows);
   });
 });
 
 app.post('/api/personnel', authenticateToken, (req, res) => {
-  const { name, salary, sgk_cost, month, year } = req.body;
-  const trimmedName = typeof name === 'string' ? name.trim() : '';
-  const normalizedSalary = Number(salary);
-  const normalizedSgk = Number(sgk_cost);
-
-  if (!trimmedName || !Number.isFinite(normalizedSalary) || !Number.isFinite(normalizedSgk)) {
-    return res.status(400).json({ error: 'Invalid personnel payload' });
-  }
-
-  const period = normalizeMonthYear(month, year);
-
-  db.run(
-    'INSERT INTO personnel (name, salary, sgk_cost) VALUES (?, ?, ?)',
-    [trimmedName, normalizedSalary, normalizedSgk],
-    function(insertErr) {
-      if (insertErr) {
-        return res.status(500).json({ error: insertErr.message });
-      }
-      const personnelId = this.lastID;
-      db.run(
-        'INSERT OR REPLACE INTO personnel_wages (personnel_id, month, year, salary, sgk_cost) VALUES (?, ?, ?, ?, ?)',
-        [personnelId, period.month, period.year, normalizedSalary, normalizedSgk],
-        (wageErr) => {
-          if (wageErr) {
-            return res.status(500).json({ error: wageErr.message });
-          }
-          syncLatestPersonnelWage(personnelId, (syncErr) => {
-            if (syncErr) {
-              return res.status(500).json({ error: syncErr.message });
-            }
-            res.status(201).json({
-              id: personnelId,
-              name: trimmedName,
-              salary: normalizedSalary,
-              sgk_cost: normalizedSgk,
-              source_month: period.month,
-              source_year: period.year,
-              is_inherited: false,
-            });
-          });
-        },
-      );
-    },
-  );
+  const { name, salary, sgk_cost } = req.body;
+  db.run('INSERT INTO personnel (name, salary, sgk_cost) VALUES (?, ?, ?)', 
+    [name, salary, sgk_cost], function(err) {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json({ id: this.lastID, name, salary, sgk_cost });
+  });
 });
 
 app.put('/api/personnel/:id', authenticateToken, (req, res) => {
+  const { name, salary, sgk_cost } = req.body;
   const { id } = req.params;
-  const { name, salary, sgk_cost, month, year } = req.body;
-  const personnelId = Number(id);
-  const trimmedName = typeof name === 'string' ? name.trim() : '';
-  const normalizedSalary = Number(salary);
-  const normalizedSgk = Number(sgk_cost);
-
-  if (!Number.isInteger(personnelId) || personnelId <= 0) {
-    return res.status(400).json({ error: 'Invalid personnel id' });
-  }
-
-  if (!trimmedName || !Number.isFinite(normalizedSalary) || !Number.isFinite(normalizedSgk)) {
-    return res.status(400).json({ error: 'Invalid personnel payload' });
-  }
-
-  const period = normalizeMonthYear(month, year);
-
-  db.get('SELECT id FROM personnel WHERE id = ?', [personnelId], (lookupErr, existing) => {
-    if (lookupErr) {
-      return res.status(500).json({ error: lookupErr.message });
+  
+  db.run('UPDATE personnel SET name = ?, salary = ?, sgk_cost = ? WHERE id = ?', 
+    [name, salary, sgk_cost, id], function(err) {
+    if (err) {
+      return res.status(500).json({ error: err.message });
     }
-    if (!existing) {
-      return res.status(404).json({ error: 'Personnel not found' });
-    }
-
-    db.serialize(() => {
-      db.run(
-        'UPDATE personnel SET name = ? WHERE id = ?',
-        [trimmedName, personnelId],
-        (nameErr) => {
-          if (nameErr) {
-            return res.status(500).json({ error: nameErr.message });
-          }
-
-          db.run(
-            'INSERT OR REPLACE INTO personnel_wages (personnel_id, month, year, salary, sgk_cost) VALUES (?, ?, ?, ?, ?)',
-            [personnelId, period.month, period.year, normalizedSalary, normalizedSgk],
-            (wageErr) => {
-              if (wageErr) {
-                return res.status(500).json({ error: wageErr.message });
-              }
-
-              syncLatestPersonnelWage(personnelId, (syncErr) => {
-                if (syncErr) {
-                  return res.status(500).json({ error: syncErr.message });
-                }
-
-                res.json({ message: 'Personnel updated successfully' });
-              });
-            },
-          );
-        },
-      );
-    });
+    res.json({ message: 'Personnel updated successfully' });
   });
 });
 
@@ -862,49 +365,6 @@ app.post('/api/business-expenses', authenticateToken, (req, res) => {
   });
 });
 
-app.put('/api/business-expenses/:id', authenticateToken, (req, res) => {
-  const { id } = req.params;
-  const { expense_name, expense_date, amount } = req.body;
-  const name = (expense_name || '').trim();
-  const dateValue = expense_date ? new Date(expense_date) : null;
-  const parsedAmount = Number(amount);
-
-  if (!name || !dateValue || Number.isNaN(dateValue.getTime()) || !Number.isFinite(parsedAmount)) {
-    return res.status(400).json({ error: 'invalid-expense' });
-  }
-
-  const month = dateValue.getMonth() + 1;
-  const year = dateValue.getFullYear();
-
-  db.run(
-    'UPDATE business_expenses SET expense_name = ?, expense_date = ?, amount = ?, month = ?, year = ? WHERE id = ?',
-    [name, expense_date, parsedAmount, month, year, id],
-    function(err) {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
-      if (this.changes === 0) {
-        return res.status(404).json({ error: 'expense-not-found' });
-      }
-      res.json({ id: Number(id), expense_name: name, expense_date, amount: parsedAmount, month, year });
-    }
-  );
-});
-
-app.delete('/api/business-expenses/:id', authenticateToken, (req, res) => {
-  const { id } = req.params;
-
-  db.run('DELETE FROM business_expenses WHERE id = ?', [id], function(err) {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-    if (this.changes === 0) {
-      return res.status(404).json({ error: 'expense-not-found' });
-    }
-    res.json({ success: true });
-  });
-});
-
   // Stock Codes Routes
   app.get('/api/stock-codes', authenticateToken, (req, res) => {
     db.all('SELECT * FROM stock_codes WHERE is_active = 1 ORDER BY stock_code', (err, rows) => {
@@ -916,56 +376,26 @@ app.delete('/api/business-expenses/:id', authenticateToken, (req, res) => {
   });
 
   app.post('/api/stock-codes', authenticateToken, (req, res) => {
-  const { product_name, brand, unit } = req.body;
-
-  const reuseSql = "SELECT id, stock_code FROM stock_codes WHERE is_active = 0 ORDER BY CAST(SUBSTR(stock_code, 4) AS INTEGER) DESC, id DESC LIMIT 1";
-  db.get(reuseSql, (reuseErr, inactive) => {
-    if (reuseErr) {
-      return res.status(500).json({ error: reuseErr.message });
+    const { product_name, brand, unit } = req.body;
+  
+  // Get next stock code by taking max numeric part of all existing codes
+  db.get("SELECT COALESCE(MAX(CAST(SUBSTR(stock_code, 4) AS INTEGER)), 0) AS maxnum FROM stock_codes", (err, row) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
     }
 
-    if (inactive) {
-      db.run(
-        'UPDATE stock_codes SET product_name = ?, brand = ?, unit = ?, is_active = 1 WHERE id = ?',
-        [product_name, brand || '', unit, inactive.id],
-        function(updateErr) {
-          if (updateErr) {
-            return res.status(500).json({ error: updateErr.message });
-          }
-          res.json({ id: inactive.id, stock_code: inactive.stock_code, product_name, brand: brand || '', unit });
-        }
-      );
-      return;
-    }
+    const nextNum = (row && row.maxnum ? row.maxnum : 0) + 1;
+    let nextCode = `GDK${String(nextNum).padStart(4, '0')}`;
 
-    const nextSql = "SELECT stock_code FROM stock_codes WHERE stock_code LIKE 'GDK____' ORDER BY CAST(SUBSTR(stock_code, 4) AS INTEGER) DESC LIMIT 1";
-    db.get(nextSql, (err, row) => {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
-
-      let nextNumber = 1;
-      if (row && row.stock_code) {
-        const numericPart = Number(row.stock_code.slice(3));
-        if (!Number.isNaN(numericPart)) {
-          nextNumber = numericPart + 1;
+      db.run('INSERT INTO stock_codes (stock_code, product_name, brand, unit) VALUES (?, ?, ?, ?)', 
+        [nextCode, product_name, brand || '', unit], function(err) {
+        if (err) {
+          return res.status(500).json({ error: err.message });
         }
-      }
-
-      const nextCode = `GDK${String(nextNumber).padStart(4, '0')}`;
-      db.run(
-        'INSERT INTO stock_codes (stock_code, product_name, brand, unit) VALUES (?, ?, ?, ?)',
-        [nextCode, product_name, brand || '', unit],
-        function(insertErr) {
-          if (insertErr) {
-            return res.status(500).json({ error: insertErr.message });
-          }
-          res.json({ id: this.lastID, stock_code: nextCode, product_name, brand: brand || '', unit });
-        }
-      );
+        res.json({ id: this.lastID, stock_code: nextCode, product_name, brand, unit });
+      });
     });
   });
-});
 
   // Update a stock code
   app.put('/api/stock-codes/:id', authenticateToken, (req, res) => {
@@ -1148,30 +578,34 @@ app.post('/api/product-prices', authenticateToken, (req, res) => {
 app.put('/api/product-prices/:id', authenticateToken, (req, res) => {
   const { id } = req.params;
   const { price, effective_date } = req.body;
-
-  const normalizedPrice = Number(price);
-  if (Number.isNaN(normalizedPrice) || normalizedPrice <= 0) {
-    return res.status(400).json({ error: 'GeÃ§ersiz fiyat' });
-  }
-
-  db.run(`UPDATE product_prices
-      SET price = ?, effective_date = ?
-      WHERE id = ?`,
-    [normalizedPrice, effective_date, id],
-    function(err) {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
-      if (this.changes === 0) {
-        return res.status(404).json({ error: 'Product not found' });
-      }
-      db.get('SELECT * FROM product_prices WHERE id = ?', [id], (selectErr, updatedRow) => {
-        if (selectErr) {
-          return res.status(500).json({ error: selectErr.message });
+  
+  // First get the current product details
+  db.get('SELECT * FROM product_prices WHERE id = ?', [id], (err, currentProduct) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    
+    if (!currentProduct) {
+      return res.status(404).json({ error: 'Product not found' });
+    }
+    
+    // Create new price entry (preserving price history)
+    db.run(`INSERT INTO product_prices (product_name, category, price, effective_date) 
+      VALUES (?, ?, ?, ?)`, 
+      [currentProduct.product_name, currentProduct.category, price, effective_date], 
+      function(err) {
+        if (err) {
+          return res.status(500).json({ error: err.message });
         }
-        res.json(updatedRow);
+        res.json({ 
+          id: this.lastID, 
+          product_name: currentProduct.product_name, 
+          category: currentProduct.category, 
+          price, 
+          effective_date 
+        });
       });
-    });
+  });
 });
 
 // Delete a product price entry (removes a single history row)
@@ -1570,7 +1004,6 @@ app.put('/api/orders/:id', (req, res) => {
           return res.status(500).json({ error: err.message });
         }
         res.json({ message: 'Order updated successfully' });
-        scheduleTrain();
       });
   });
 });
@@ -1667,7 +1100,7 @@ app.post('/api/orders/:orderId/partial-payment', (req, res) => {
   const { items, amount, payment, change, table_number, order_type, description } = req.body || {};
 
   if (!Array.isArray(items) || !items.length) {
-    return res.status(400).json({ error: 'ParÃ§a Ã¶deme iÃ§in geÃ§ersiz Ã¼rÃ¼n listesi' });
+    return res.status(400).json({ error: 'Parca ödeme için geçersiz ürün listesi' });
   }
 
   const sanitizedItems = items
@@ -1684,7 +1117,7 @@ app.post('/api/orders/:orderId/partial-payment', (req, res) => {
     .filter(Boolean);
 
   if (!sanitizedItems.length) {
-    return res.status(400).json({ error: 'ParÃ§a Ã¶deme iÃ§in geÃ§ersiz Ã¼rÃ¼n bilgisi' });
+    return res.status(400).json({ error: 'Parca ödeme için geçersiz ürün bilgisi' });
   }
 
   const computedTotal = sanitizedItems.reduce((sum, item) => sum + item.total_price, 0);
@@ -1705,7 +1138,7 @@ app.post('/api/orders/:orderId/partial-payment', (req, res) => {
 
     const baseTable = table_number != null ? table_number : orderRow.table_number;
     const baseType = order_type || orderRow.order_type;
-    const paymentDescription = description || `ParÃ§a Ã¶deme #${orderId}`;
+    const paymentDescription = description || `Parca ödeme #${orderId}`;
 
     db.serialize(() => {
       db.run('BEGIN TRANSACTION');
@@ -1740,13 +1173,23 @@ app.post('/api/orders/:orderId/partial-payment', (req, res) => {
               return db.run('ROLLBACK', () => res.status(500).json({ error: finalizeErr.message }));
             }
 
-            db.run('COMMIT', (commitErr) => {
-              if (commitErr) {
-                return res.status(500).json({ error: commitErr.message });
-              }
+            db.run(
+              'UPDATE orders SET payment_received = COALESCE(payment_received, 0) + ? WHERE id = ?',
+              [totalAmount, orderId],
+              (updateErr) => {
+                if (updateErr) {
+                  return db.run('ROLLBACK', () => res.status(500).json({ error: updateErr.message }));
+                }
 
-              res.json({ partial_order_id: partialOrderId });
-            });
+                db.run('COMMIT', (commitErr) => {
+                  if (commitErr) {
+                    return res.status(500).json({ error: commitErr.message });
+                  }
+
+                  res.json({ partial_order_id: partialOrderId });
+                });
+              }
+            );
           });
         }
       );
@@ -1754,31 +1197,6 @@ app.post('/api/orders/:orderId/partial-payment', (req, res) => {
   });
 });
 
-
-app.post('/api/maintenance/cleanup-prices', authenticateToken, (req, res) => {
-  db.serialize(() => {
-    db.run('BEGIN TRANSACTION');
-    db.run(`DELETE FROM product_prices
-            WHERE id NOT IN (
-              SELECT id FROM (
-                SELECT id,
-                       ROW_NUMBER() OVER (PARTITION BY product_name ORDER BY effective_date DESC, id DESC) as rn
-                FROM product_prices
-              ) ranked
-              WHERE ranked.rn <= 5
-            )`, (err) => {
-      if (err) {
-        return db.run('ROLLBACK', () => res.status(500).json({ error: err.message }));
-      }
-      db.run('COMMIT', (commitErr) => {
-        if (commitErr) {
-          return res.status(500).json({ error: commitErr.message });
-        }
-        res.json({ message: 'Fazla fiyat geÃ§miÅŸi temizlendi.' });
-      });
-    });
-  });
-});
 
 // Helper function to update order total
 function updateOrderTotal(orderId) {
@@ -1791,8 +1209,6 @@ function updateOrderTotal(orderId) {
     
     const total = result.total || 0;
     db.run('UPDATE orders SET total_amount = ? WHERE id = ?', [total, orderId]);
-    // Debounced model retrain after order total changes
-    scheduleTrain();
   });
 }
 
@@ -1805,299 +1221,6 @@ app.get('/api/daily-revenue', (req, res) => {
       return res.status(500).json({ error: err.message });
     }
     res.json({ daily_revenue: (row && row.daily_revenue) ? row.daily_revenue : 0 });
-  });
-});
-
-// POS layout settings (global)
-app.get('/api/pos-layout', (req, res) => {
-  db.get('SELECT value FROM app_settings WHERE key = ?', ['pos_layout'], (err, row) => {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-    if (!row || !row.value) {
-      return res.json({ positionsLocked: true, productOrder: {}, categoryOrder: [] });
-    }
-    try {
-      const parsed = JSON.parse(row.value);
-      res.json({
-        positionsLocked: Boolean(parsed.positionsLocked),
-        productOrder: parsed.productOrder && typeof parsed.productOrder === 'object' ? parsed.productOrder : {},
-        categoryOrder: Array.isArray(parsed.categoryOrder) ? parsed.categoryOrder : [],
-      });
-    } catch (e) {
-      res.status(500).json({ error: 'invalid-layout-json' });
-    }
-  });
-});
-
-app.put('/api/pos-layout', express.json(), (req, res) => {
-  const payload = req.body || {};
-  const positionsLocked = Boolean(payload.positionsLocked);
-  const productOrder = payload.productOrder && typeof payload.productOrder === 'object' ? payload.productOrder : {};
-  const categoryOrder = Array.isArray(payload.categoryOrder) ? payload.categoryOrder : [];
-  const value = JSON.stringify({ positionsLocked, productOrder, categoryOrder });
-  db.run(
-    `INSERT INTO app_settings (key, value, updated_at) VALUES ('pos_layout', ?, CURRENT_TIMESTAMP)
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`,
-    [value],
-    function(err) {
-      if (err) {
-        return res.status(500).json({ error: err.message });
-      }
-      res.json({ success: true });
-    }
-  );
-});
-
-// Analytics: Daily summary (hourly breakdown)
-app.get('/api/analytics/daily', authenticateToken, (req, res) => {
-  const dateParam = (req.query.date || new Date().toISOString().split('T')[0]).slice(0, 10);
-
-  const byHourSql = `
-    SELECT strftime('%H', o.order_date) AS hour,
-           COUNT(DISTINCT o.id) AS transactions,
-           COALESCE(SUM(oi.quantity), 0) AS items_sold,
-           COALESCE(SUM(oi.total_price), 0) AS revenue
-    FROM orders o
-    LEFT JOIN order_items oi ON oi.order_id = o.id
-    WHERE date(o.order_date) = date(?)
-    GROUP BY hour
-    ORDER BY hour`;
-
-  const totalsSql = `
-    SELECT COUNT(DISTINCT o.id) AS transactions,
-           COALESCE(SUM(oi.quantity), 0) AS items_sold,
-           COALESCE(SUM(oi.total_price), 0) AS revenue
-    FROM orders o
-    LEFT JOIN order_items oi ON oi.order_id = o.id
-    WHERE date(o.order_date) = date(?)`;
-
-  db.all(byHourSql, [dateParam], (err, hourRows) => {
-    if (err) return res.status(500).json({ error: err.message });
-
-    db.get(totalsSql, [dateParam], (tErr, totals) => {
-      if (tErr) return res.status(500).json({ error: tErr.message });
-
-      const byHourMap = new Map((hourRows || []).map(r => [r.hour, r]));
-      const byHour = Array.from({ length: 24 }, (_, h) => {
-        const key = String(h).padStart(2, '0');
-        const r = byHourMap.get(key) || {};
-        return {
-          hour: key,
-          transactions: Number(r.transactions || 0),
-          itemsSold: Number(r.items_sold || 0),
-          revenue: Number(r.revenue || 0),
-        };
-      });
-
-      const tr = Number(totals?.transactions || 0);
-      const items = Number(totals?.items_sold || 0);
-      const rev = Number(totals?.revenue || 0);
-      const avgTicket = tr > 0 ? Number((rev / tr).toFixed(2)) : 0;
-      const avgBasketSize = tr > 0 ? Number((items / tr).toFixed(2)) : 0;
-
-      res.json({
-        date: dateParam,
-        byHour,
-        totals: {
-          transactions: tr,
-          itemsSold: items,
-          revenue: rev,
-          avgTicket,
-          avgBasketSize,
-          expectedPeople: tr, // approximate expected customers as transactions
-        },
-      });
-    });
-  });
-});
-
-// Analytics: Weekly summary (by day, WoW trends)
-app.get('/api/analytics/weekly', authenticateToken, (req, res) => {
-  const endParam = (req.query.end || new Date().toISOString().split('T')[0]).slice(0, 10);
-  // default start = 6 days before end (7-day window)
-  const startParam = (req.query.start || new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]).slice(0, 10);
-
-  const byDaySql = `
-    SELECT date(o.order_date) AS d,
-           COUNT(DISTINCT o.id) AS transactions,
-           COALESCE(SUM(oi.quantity), 0) AS items_sold,
-           COALESCE(SUM(oi.total_price), 0) AS revenue
-    FROM orders o
-    LEFT JOIN order_items oi ON oi.order_id = o.id
-    WHERE date(o.order_date) BETWEEN date(?) AND date(?)
-    GROUP BY d
-    ORDER BY d`;
-
-  const prevByDaySql = `
-    SELECT date(o.order_date) AS d,
-           COUNT(DISTINCT o.id) AS transactions,
-           COALESCE(SUM(oi.quantity), 0) AS items_sold,
-           COALESCE(SUM(oi.total_price), 0) AS revenue
-    FROM orders o
-    LEFT JOIN order_items oi ON oi.order_id = o.id
-    WHERE date(o.order_date) BETWEEN date(?, '-7 day') AND date(?, '-7 day')
-    GROUP BY d
-    ORDER BY d`;
-
-  db.all(byDaySql, [startParam, endParam], (err, rows) => {
-    if (err) return res.status(500).json({ error: err.message });
-    db.all(prevByDaySql, [startParam, endParam], (pErr, prevRows) => {
-      if (pErr) return res.status(500).json({ error: pErr.message });
-
-      const sum = (list, key) => list.reduce((acc, r) => acc + Number(r[key] || 0), 0);
-      const cur = {
-        transactions: sum(rows || [], 'transactions'),
-        items: sum(rows || [], 'items_sold'),
-        revenue: sum(rows || [], 'revenue'),
-      };
-      const prev = {
-        transactions: sum(prevRows || [], 'transactions'),
-        items: sum(prevRows || [], 'items_sold'),
-        revenue: sum(prevRows || [], 'revenue'),
-      };
-
-      const pct = (a, b) => (b > 0 ? Number((((a - b) / b) * 100).toFixed(2)) : (a > 0 ? 100 : 0));
-
-      const byDay = (rows || []).map(r => ({
-        date: r.d,
-        transactions: Number(r.transactions || 0),
-        itemsSold: Number(r.items_sold || 0),
-        revenue: Number(r.revenue || 0),
-      }));
-
-      const tr = Number(cur.transactions || 0);
-      const items = Number(cur.items || 0);
-      const rev = Number(cur.revenue || 0);
-      const avgBasketSize = tr > 0 ? Number((items / tr).toFixed(2)) : 0;
-
-      const totalRev = byDay.reduce((acc, r) => acc + r.revenue, 0) || 0;
-      const revenueDistribution = byDay.map(r => ({ date: r.date, pct: totalRev > 0 ? Number(((r.revenue / totalRev) * 100).toFixed(2)) : 0 }));
-
-      res.json({
-        start: startParam,
-        end: endParam,
-        byDay,
-        revenueTrend: byDay.map(r => ({ date: r.date, revenue: r.revenue })),
-        revenueDistribution,
-        avgBasketSize,
-        trendComparison: {
-          transactionsWoW: pct(cur.transactions, prev.transactions),
-          itemsWoW: pct(cur.items, prev.items),
-          revenueWoW: pct(cur.revenue, prev.revenue),
-        },
-      });
-    });
-  });
-});
-
-// Analytics: Forecasts and heatmap based on last N days (default 28)
-app.get('/api/analytics/forecast', authenticateToken, (req, res) => {
-  const days = Math.min(Math.max(parseInt(req.query.days || '28', 10), 7), 90);
-  const endDate = new Date();
-  const startDate = new Date(Date.now() - (days - 1) * 24 * 60 * 60 * 1000);
-  const endParam = endDate.toISOString().split('T')[0];
-  const startParam = startDate.toISOString().split('T')[0];
-
-  const heatSql = `
-    SELECT CAST(strftime('%w', o.order_date) AS INTEGER) AS dow,
-           strftime('%H', o.order_date) AS hour,
-           COUNT(DISTINCT o.id) AS transactions,
-           COALESCE(SUM(oi.quantity), 0) AS items_sold
-    FROM orders o
-    LEFT JOIN order_items oi ON oi.order_id = o.id
-    WHERE date(o.order_date) BETWEEN date(?) AND date(?)
-    GROUP BY dow, hour
-    ORDER BY dow, hour`;
-
-  const byDaySql = `
-    SELECT date(o.order_date) AS d,
-           COUNT(DISTINCT o.id) AS transactions,
-           COALESCE(SUM(oi.quantity), 0) AS items_sold
-    FROM orders o
-    LEFT JOIN order_items oi ON oi.order_id = o.id
-    WHERE date(o.order_date) BETWEEN date(?) AND date(?)
-    GROUP BY d
-    ORDER BY d`;
-
-  db.all(heatSql, [startParam, endParam], (hErr, heatRows) => {
-    if (hErr) return res.status(500).json({ error: hErr.message });
-    db.all(byDaySql, [startParam, endParam], (dErr, byDayRows) => {
-      if (dErr) return res.status(500).json({ error: dErr.message });
-
-      // Count days per weekday in the window
-      const daysPerDow = Array.from({ length: 7 }, () => 0);
-      (byDayRows || []).forEach(r => {
-        const dow = new Date(r.d + 'T00:00:00Z').getUTCDay();
-        daysPerDow[dow] += 1;
-      });
-
-      const matrix = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => 0));
-      (heatRows || []).forEach(r => {
-        const dow = Number(r.dow || 0);
-        const hour = Number(r.hour || 0);
-        const denom = daysPerDow[dow] || 1;
-        const avg = Number(r.items_sold || 0) / denom;
-        matrix[dow][hour] = Number(avg.toFixed(2));
-      });
-
-      // Expected customers tomorrow = average transactions of same weekday
-      const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
-      const tomorrowDow = tomorrow.getUTCDay();
-      const tomorrowDates = (byDayRows || []).filter(r => new Date(r.d + 'T00:00:00Z').getUTCDay() === tomorrowDow);
-      // Use trained model for expected customers if available; fallback to simple avg
-      const useModel = (cb) => {
-        predictTomorrowCustomers((predErr, val) => {
-          if (predErr) {
-            const fallback = tomorrowDates.length
-              ? Math.round(tomorrowDates.reduce((a, r) => a + Number(r.transactions || 0), 0) / tomorrowDates.length)
-              : 0;
-            return cb(fallback);
-          }
-          cb(val);
-        });
-      };
-
-      useModel((expectedCustomersTomorrow) => {
-        // Pick the 2-hour window with the highest expected items
-        const dowMatrix = matrix[tomorrowDow] || [];
-        let bestStart = 10;
-        let bestScore = -1;
-        for (let h = 0; h < 23; h++) {
-          const score = (dowMatrix[h] || 0) + (dowMatrix[h + 1] || 0);
-          if (score > bestScore) {
-            bestScore = score;
-            bestStart = h;
-          }
-        }
-        const pad = (n) => String(n).padStart(2, '0');
-        const rec = `Expect ${(bestScore > 0 ? 'higher' : 'low')} traffic between ${pad(bestStart)}:00â€“${pad((bestStart + 2) % 24)}:00.`;
-
-        res.json({
-          window: { start: startParam, end: endParam, days },
-          hourlyHeatmap: matrix, // 0=Sunday..6=Saturday, each with 24-hour averages (items)
-          expectedCustomersTomorrow,
-          staffingRecommendation: rec,
-        });
-      });
-    });
-  });
-});
-
-// Trigger model training on demand
-app.post('/api/analytics/train', authenticateToken, (req, res) => {
-  trainForecastModel((err, model) => {
-    if (err) return res.status(500).json({ error: err.message || String(err) });
-    res.json({ message: 'trained', stats: { mse: model.mse, mae: model.mae, samples: model.samples } });
-  });
-});
-
-// Return current model metadata
-app.get('/api/analytics/model', authenticateToken, (req, res) => {
-  loadModel('expected_customers_daily_v1', (err, model) => {
-    if (err) return res.status(500).json({ error: err.message });
-    if (!model) return res.json(null);
-    res.json(model);
   });
 });
 
@@ -2124,29 +1247,6 @@ app.get('/api/daily-closings', authenticateToken, (req, res) => {
   });
 });
 
-// Cleanup daily closings for a given period (month/year or start/end)
-app.post('/api/daily-closings/cleanup', authenticateToken, (req, res) => {
-  const body = req.body || {};
-  const { month, year, start, end } = body;
-  let sql = '';
-  let params = [];
-  if (month && year) {
-    sql = 'DELETE FROM daily_closings WHERE strftime("%m", closing_date) = ? AND strftime("%Y", closing_date) = ?';
-    params = [String(month).padStart(2, '0'), String(year)];
-  } else if (start && end) {
-    sql = 'DELETE FROM daily_closings WHERE date(closing_date) BETWEEN date(?) AND date(?)';
-    params = [start, end];
-  } else {
-    return res.status(400).json({ error: 'invalid-range' });
-  }
-  db.run(sql, params, function(err) {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-    res.json({ deleted: this.changes || 0 });
-  });
-});
-
 // End-of-day endpoint
 app.post('/api/end-of-day', authenticateToken, (req, res) => {
   const today = new Date().toISOString().split('T')[0];
@@ -2161,19 +1261,12 @@ app.post('/api/end-of-day', authenticateToken, (req, res) => {
           if (uErr) { return res.status(500).json({ error: uErr.message }); }
           db.run('UPDATE orders SET is_closed = 1, payment_received = COALESCE(payment_received, total_amount), change_given = COALESCE(change_given, 0), accounted = 1 WHERE DATE(order_date) = ? AND is_closed = 0', [today], (u2Err) => {
             if (u2Err) { return res.status(500).json({ error: u2Err.message }); }
-            res.json({ message: 'GÃ¼nsonu alÄ±ndÄ±', archived_amount: total });
+            res.json({ message: 'Günsonu alindi', archived_amount: total });
           });
         });
       });
     });
   });
-});
-
-app.get('*', (req, res, next) => {
-  if (req.path.startsWith('/api')) {
-    return next();
-  }
-  res.sendFile(path.join(publicDir, 'index.html'));
 });
 
 // Error handling middleware
@@ -2185,13 +1278,6 @@ app.use((err, req, res, next) => {
 // Start server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  // Kick off initial model training and periodic retraining (hourly)
-  try {
-    setTimeout(() => trainForecastModel(() => {}), 5000);
-    setInterval(() => trainForecastModel(() => {}), 60 * 60 * 1000);
-  } catch (e) {
-    // ignore training scheduling errors
-  }
 });
 
 // Graceful shutdown
@@ -2204,5 +1290,4 @@ process.on('SIGINT', () => {
     process.exit(0);
   });
 });
-
 
