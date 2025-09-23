@@ -8,6 +8,7 @@ import StockCodes from './pages/StockCodes.jsx';
 import StockPurchase from './pages/StockPurchase.jsx';
 import ProductPrices from './pages/ProductPrices.jsx';
 import Reports from './pages/Reports.jsx';
+import PerformansTakibi from './pages/PerformansTakibi.jsx';
 import CiroGecmisi from './pages/CiroGecmisi.jsx';
 import VeriYazdirma from './pages/VeriYazdirma.jsx';
 import MaliyetHesaplama from './pages/MaliyetHesaplama.jsx';
@@ -199,7 +200,7 @@ export default function App() {
                 { id: 'stock-purchase', label: 'Stok Güncelleme', icon: Package },
                 { id: 'product-prices', label: 'Ürün Fiyatlari', icon: Settings },
                 { id: 'costing', label: 'Maliyet Hesaplama', icon: Calculator },
-                { id: 'reports', label: 'Ciro ve Net Kâr', icon: BarChart3 },
+                                { id: 'performance', label: 'Performans Takibi', icon: BarChart3 },
                 { id: 'closings', label: 'Ciro Geçmişi', icon: BarChart3 },
                 { id: 'export', label: 'Veri Yazdirma', icon: BarChart3 },
               ].map(({ id, label, icon: Icon }) => (
@@ -222,6 +223,7 @@ export default function App() {
             {currentPage === 'product-prices' && <ProductPrices />}
             {currentPage === 'costing' && <MaliyetHesaplama />}
             {currentPage === 'reports' && <Reports />}
+            {currentPage === 'performance' && <PerformansTakibi />}
             {currentPage === 'closings' && <CiroGecmisi />}
             {currentPage === 'export' && <VeriYazdirma />}
           </main>
@@ -230,4 +232,5 @@ export default function App() {
     </div>
   );
 }
+
 

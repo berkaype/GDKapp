@@ -1570,6 +1570,230 @@ app.get('/api/daily-revenue', (req, res) => {
   });
 });
 
+// Analytics: Daily summary (hourly breakdown)
+app.get('/api/analytics/daily', authenticateToken, (req, res) => {
+  const dateParam = (req.query.date || new Date().toISOString().split('T')[0]).slice(0, 10);
+
+  const byHourSql = `
+    SELECT strftime('%H', o.order_date) AS hour,
+           COUNT(DISTINCT o.id) AS transactions,
+           COALESCE(SUM(oi.quantity), 0) AS items_sold,
+           COALESCE(SUM(oi.total_price), 0) AS revenue
+    FROM orders o
+    LEFT JOIN order_items oi ON oi.order_id = o.id
+    WHERE date(o.order_date) = date(?)
+    GROUP BY hour
+    ORDER BY hour`;
+
+  const totalsSql = `
+    SELECT COUNT(DISTINCT o.id) AS transactions,
+           COALESCE(SUM(oi.quantity), 0) AS items_sold,
+           COALESCE(SUM(oi.total_price), 0) AS revenue
+    FROM orders o
+    LEFT JOIN order_items oi ON oi.order_id = o.id
+    WHERE date(o.order_date) = date(?)`;
+
+  db.all(byHourSql, [dateParam], (err, hourRows) => {
+    if (err) return res.status(500).json({ error: err.message });
+
+    db.get(totalsSql, [dateParam], (tErr, totals) => {
+      if (tErr) return res.status(500).json({ error: tErr.message });
+
+      const byHourMap = new Map((hourRows || []).map(r => [r.hour, r]));
+      const byHour = Array.from({ length: 24 }, (_, h) => {
+        const key = String(h).padStart(2, '0');
+        const r = byHourMap.get(key) || {};
+        return {
+          hour: key,
+          transactions: Number(r.transactions || 0),
+          itemsSold: Number(r.items_sold || 0),
+          revenue: Number(r.revenue || 0),
+        };
+      });
+
+      const tr = Number(totals?.transactions || 0);
+      const items = Number(totals?.items_sold || 0);
+      const rev = Number(totals?.revenue || 0);
+      const avgTicket = tr > 0 ? Number((rev / tr).toFixed(2)) : 0;
+      const avgBasketSize = tr > 0 ? Number((items / tr).toFixed(2)) : 0;
+
+      res.json({
+        date: dateParam,
+        byHour,
+        totals: {
+          transactions: tr,
+          itemsSold: items,
+          revenue: rev,
+          avgTicket,
+          avgBasketSize,
+          expectedPeople: tr, // approximate expected customers as transactions
+        },
+      });
+    });
+  });
+});
+
+// Analytics: Weekly summary (by day, WoW trends)
+app.get('/api/analytics/weekly', authenticateToken, (req, res) => {
+  const endParam = (req.query.end || new Date().toISOString().split('T')[0]).slice(0, 10);
+  // default start = 6 days before end (7-day window)
+  const startParam = (req.query.start || new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]).slice(0, 10);
+
+  const byDaySql = `
+    SELECT date(o.order_date) AS d,
+           COUNT(DISTINCT o.id) AS transactions,
+           COALESCE(SUM(oi.quantity), 0) AS items_sold,
+           COALESCE(SUM(oi.total_price), 0) AS revenue
+    FROM orders o
+    LEFT JOIN order_items oi ON oi.order_id = o.id
+    WHERE date(o.order_date) BETWEEN date(?) AND date(?)
+    GROUP BY d
+    ORDER BY d`;
+
+  const prevByDaySql = `
+    SELECT date(o.order_date) AS d,
+           COUNT(DISTINCT o.id) AS transactions,
+           COALESCE(SUM(oi.quantity), 0) AS items_sold,
+           COALESCE(SUM(oi.total_price), 0) AS revenue
+    FROM orders o
+    LEFT JOIN order_items oi ON oi.order_id = o.id
+    WHERE date(o.order_date) BETWEEN date(?, '-7 day') AND date(?, '-7 day')
+    GROUP BY d
+    ORDER BY d`;
+
+  db.all(byDaySql, [startParam, endParam], (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    db.all(prevByDaySql, [startParam, endParam], (pErr, prevRows) => {
+      if (pErr) return res.status(500).json({ error: pErr.message });
+
+      const sum = (list, key) => list.reduce((acc, r) => acc + Number(r[key] || 0), 0);
+      const cur = {
+        transactions: sum(rows || [], 'transactions'),
+        items: sum(rows || [], 'items_sold'),
+        revenue: sum(rows || [], 'revenue'),
+      };
+      const prev = {
+        transactions: sum(prevRows || [], 'transactions'),
+        items: sum(prevRows || [], 'items_sold'),
+        revenue: sum(prevRows || [], 'revenue'),
+      };
+
+      const pct = (a, b) => (b > 0 ? Number((((a - b) / b) * 100).toFixed(2)) : (a > 0 ? 100 : 0));
+
+      const byDay = (rows || []).map(r => ({
+        date: r.d,
+        transactions: Number(r.transactions || 0),
+        itemsSold: Number(r.items_sold || 0),
+        revenue: Number(r.revenue || 0),
+      }));
+
+      const tr = Number(cur.transactions || 0);
+      const items = Number(cur.items || 0);
+      const rev = Number(cur.revenue || 0);
+      const avgBasketSize = tr > 0 ? Number((items / tr).toFixed(2)) : 0;
+
+      const totalRev = byDay.reduce((acc, r) => acc + r.revenue, 0) || 0;
+      const revenueDistribution = byDay.map(r => ({ date: r.date, pct: totalRev > 0 ? Number(((r.revenue / totalRev) * 100).toFixed(2)) : 0 }));
+
+      res.json({
+        start: startParam,
+        end: endParam,
+        byDay,
+        revenueTrend: byDay.map(r => ({ date: r.date, revenue: r.revenue })),
+        revenueDistribution,
+        avgBasketSize,
+        trendComparison: {
+          transactionsWoW: pct(cur.transactions, prev.transactions),
+          itemsWoW: pct(cur.items, prev.items),
+          revenueWoW: pct(cur.revenue, prev.revenue),
+        },
+      });
+    });
+  });
+});
+
+// Analytics: Forecasts and heatmap based on last N days (default 28)
+app.get('/api/analytics/forecast', authenticateToken, (req, res) => {
+  const days = Math.min(Math.max(parseInt(req.query.days || '28', 10), 7), 90);
+  const endDate = new Date();
+  const startDate = new Date(Date.now() - (days - 1) * 24 * 60 * 60 * 1000);
+  const endParam = endDate.toISOString().split('T')[0];
+  const startParam = startDate.toISOString().split('T')[0];
+
+  const heatSql = `
+    SELECT CAST(strftime('%w', o.order_date) AS INTEGER) AS dow,
+           strftime('%H', o.order_date) AS hour,
+           COUNT(DISTINCT o.id) AS transactions,
+           COALESCE(SUM(oi.quantity), 0) AS items_sold
+    FROM orders o
+    LEFT JOIN order_items oi ON oi.order_id = o.id
+    WHERE date(o.order_date) BETWEEN date(?) AND date(?)
+    GROUP BY dow, hour
+    ORDER BY dow, hour`;
+
+  const byDaySql = `
+    SELECT date(o.order_date) AS d,
+           COUNT(DISTINCT o.id) AS transactions,
+           COALESCE(SUM(oi.quantity), 0) AS items_sold
+    FROM orders o
+    LEFT JOIN order_items oi ON oi.order_id = o.id
+    WHERE date(o.order_date) BETWEEN date(?) AND date(?)
+    GROUP BY d
+    ORDER BY d`;
+
+  db.all(heatSql, [startParam, endParam], (hErr, heatRows) => {
+    if (hErr) return res.status(500).json({ error: hErr.message });
+    db.all(byDaySql, [startParam, endParam], (dErr, byDayRows) => {
+      if (dErr) return res.status(500).json({ error: dErr.message });
+
+      // Count days per weekday in the window
+      const daysPerDow = Array.from({ length: 7 }, () => 0);
+      (byDayRows || []).forEach(r => {
+        const dow = new Date(r.d + 'T00:00:00Z').getUTCDay();
+        daysPerDow[dow] += 1;
+      });
+
+      const matrix = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => 0));
+      (heatRows || []).forEach(r => {
+        const dow = Number(r.dow || 0);
+        const hour = Number(r.hour || 0);
+        const denom = daysPerDow[dow] || 1;
+        const avg = Number(r.items_sold || 0) / denom;
+        matrix[dow][hour] = Number(avg.toFixed(2));
+      });
+
+      // Expected customers tomorrow = average transactions of same weekday
+      const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+      const tomorrowDow = tomorrow.getUTCDay();
+      const tomorrowDates = (byDayRows || []).filter(r => new Date(r.d + 'T00:00:00Z').getUTCDay() === tomorrowDow);
+      const expectedCustomersTomorrow = tomorrowDates.length
+        ? Math.round(tomorrowDates.reduce((a, r) => a + Number(r.transactions || 0), 0) / tomorrowDates.length)
+        : 0;
+
+      // Pick the 2-hour window with the highest expected items
+      const dowMatrix = matrix[tomorrowDow] || [];
+      let bestStart = 10;
+      let bestScore = -1;
+      for (let h = 0; h < 23; h++) {
+        const score = (dowMatrix[h] || 0) + (dowMatrix[h + 1] || 0);
+        if (score > bestScore) {
+          bestScore = score;
+          bestStart = h;
+        }
+      }
+      const pad = (n) => String(n).padStart(2, '0');
+      const rec = `Expect ${(bestScore > 0 ? 'higher' : 'low')} traffic between ${pad(bestStart)}:00–${pad((bestStart + 2) % 24)}:00.`;
+
+      res.json({
+        window: { start: startParam, end: endParam, days },
+        hourlyHeatmap: matrix, // 0=Sunday..6=Saturday, each with 24-hour averages (items)
+        expectedCustomersTomorrow,
+        staffingRecommendation: rec,
+      });
+    });
+  });
+});
+
 // Daily closings history
 app.get('/api/daily-closings', authenticateToken, (req, res) => {
   const { month, year, start, end } = req.query;

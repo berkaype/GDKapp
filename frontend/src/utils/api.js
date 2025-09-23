@@ -5,7 +5,8 @@ export const getApiBase = () => {
   }
 
   if (import.meta.env.DEV) {
-    return 'http://localhost:3001/api';
+    // Use same-origin + Vite proxy to reach backend during dev
+    return '/api';
   }
 
   if (typeof window !== 'undefined' && window.location?.origin) {
