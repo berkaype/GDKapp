@@ -31,7 +31,15 @@ export default function App() {
     const userData = localStorage.getItem('user');
     if (token && userData) {
       setIsAuthenticated(true);
-      setUser(JSON.parse(userData));
+      try {
+        const parsed = JSON.parse(userData);
+        setUser(parsed);
+        if (parsed?.role === 'admin') {
+          setCurrentPage('stock-purchase');
+        }
+      } catch (e) {
+        // ignore parse error
+      }
     }
     fetchDailyRevenue();
     const handler = () => fetchDailyRevenue();
@@ -69,6 +77,16 @@ export default function App() {
         setIsAuthenticated(true);
         setUser(data.user);
         setShowLogin(false);
+        // Force junior admin to Stock Purchase page, others go to POS
+        try {
+          if (data?.user?.role === 'admin') {
+            setCurrentPage('stock-purchase');
+          } else {
+            setCurrentPage('pos');
+          }
+        } catch (e) {
+          setCurrentPage('pos');
+        }
       } else {
         alert('Geçersiz kullanici adi veya sifre');
       }
@@ -90,8 +108,19 @@ export default function App() {
       setShowLogin(true);
       return;
     }
+    const role = user?.role;
+    if (role === 'admin' && page !== 'stock-purchase') {
+      setCurrentPage('stock-purchase');
+      return;
+    }
     setCurrentPage(page);
   };
+
+  const role = user?.role || null;
+  const isJuniorAdmin = role === 'admin';
+  const effectivePage = isAuthenticated && isJuniorAdmin
+    ? (currentPage === 'pos' ? 'pos' : 'stock-purchase')
+    : currentPage;
 
   if (showLogin) {
     return (
@@ -137,12 +166,12 @@ export default function App() {
           <div className="flex flex-wrap items-center gap-4">
             <div className="flex items-center gap-4">
               <h1 className="text-2xl font-bold text-gray-900">Büfe Yönetim Sistemi</h1>
-              {currentPage === 'pos' && (
+              {effectivePage === 'pos' && (
                 <div className="text-green-700 font-bold text-3xl md:text-4xl font-mono tabular-nums">
                   {now.toLocaleTimeString('tr-TR', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}
                 </div>
               )}
-              {currentPage !== 'pos' && (
+              {effectivePage !== 'pos' && (
                 <button
                   onClick={() => setCurrentPage('pos')}
                   className="flex items-center text-blue-600 hover:text-blue-800"
@@ -187,7 +216,7 @@ export default function App() {
         </div>
       </header>
 
-      {currentPage === 'pos' ? (
+      {effectivePage === 'pos' ? (
         <POS onAdminClick={() => requireAuth('personnel')} onOrderClosed={fetchDailyRevenue} />
       ) : (
         <div className="flex">
@@ -204,11 +233,11 @@ export default function App() {
                                 { id: 'performance', label: 'Performans Takibi', icon: BarChart3 },
                 { id: 'closings', label: 'Ciro Geçmişi', icon: BarChart3 },
                 { id: 'export', label: 'Veri Yazdirma', icon: BarChart3 },
-              ].map(({ id, label, icon: Icon }) => (
+              ].filter(item => !isJuniorAdmin || item.id === 'stock-purchase').map(({ id, label, icon: Icon }) => (
                 <button
                   key={id}
                   onClick={() => requireAuth(id)}
-                  className={`w-full flex items-center px-4 py-3 text-left rounded-lg mb-2 ${currentPage === id ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100'}`}
+                  className={`w-full flex items-center px-4 py-3 text-left rounded-lg mb-2 ${effectivePage === id ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100'}`}
                 >
                   <Icon className="h-4 w-4" />
                   <span className="ml-3">{label}</span>
@@ -217,16 +246,16 @@ export default function App() {
             </nav>
           </aside>
           <main className="flex-1 p-4">
-            {currentPage === 'personnel' && <Personnel />}
-            {currentPage === 'expenses' && <Expenses />}
-            {currentPage === 'stock-codes' && <StockCodes />}
-            {currentPage === 'stock-purchase' && <StockPurchase />}
-            {currentPage === 'product-prices' && <ProductPrices />}
-            {currentPage === 'costing' && <MaliyetHesaplama />}
-            {currentPage === 'reports' && <Reports />}
-            {currentPage === 'performance' && <PerformansTakibi />}
-            {currentPage === 'closings' && <CiroGecmisi />}
-            {currentPage === 'export' && <VeriYazdirma />}
+            {effectivePage === 'personnel' && <Personnel />}
+            {effectivePage === 'expenses' && <Expenses />}
+            {effectivePage === 'stock-codes' && <StockCodes />}
+            {effectivePage === 'stock-purchase' && <StockPurchase />}
+            {effectivePage === 'product-prices' && <ProductPrices />}
+            {effectivePage === 'costing' && <MaliyetHesaplama />}
+            {effectivePage === 'reports' && <Reports />}
+            {effectivePage === 'performance' && <PerformansTakibi />}
+            {effectivePage === 'closings' && <CiroGecmisi />}
+            {effectivePage === 'export' && <VeriYazdirma />}
           </main>
         </div>
       )}

@@ -33,6 +33,19 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static(publicDir));
 
+// Role helpers
+function authorizeRoles(...roles) {
+  return (req, res, next) => {
+    if (!req.user || !req.user.role) {
+      return res.sendStatus(401);
+    }
+    if (!roles.includes(req.user.role)) {
+      return res.sendStatus(403);
+    }
+    next();
+  };
+}
+
 // Database initialization
 const db = new sqlite3.Database(dbPath, (err) => {
   if (err) {
@@ -192,6 +205,15 @@ function initializeDatabase() {
   const hashedPassword = bcrypt.hashSync('admin', 10);
   db.run(`INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)`, 
     ['admin', hashedPassword, 'admin']);
+
+  // Insert supervisory admin user
+  try {
+    const supHash = bcrypt.hashSync('Berk2219', 10);
+    db.run(`INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)`,
+      ['GDKP', supHash, 'superadmin']);
+  } catch (e) {
+    // ignore seeding error
+  }
 
   // Insert initial personnel data
   const personnelData = [
@@ -711,7 +733,7 @@ app.get('/api/personnel', authenticateToken, (req, res) => {
   });
 });
 
-app.post('/api/personnel', authenticateToken, (req, res) => {
+app.post('/api/personnel', authenticateToken, authorizeRoles('superadmin'), (req, res) => {
   const { name, salary, sgk_cost, month, year } = req.body;
   const trimmedName = typeof name === 'string' ? name.trim() : '';
   const normalizedSalary = Number(salary);
@@ -758,7 +780,7 @@ app.post('/api/personnel', authenticateToken, (req, res) => {
   );
 });
 
-app.put('/api/personnel/:id', authenticateToken, (req, res) => {
+app.put('/api/personnel/:id', authenticateToken, authorizeRoles('superadmin'), (req, res) => {
   const { id } = req.params;
   const { name, salary, sgk_cost, month, year } = req.body;
   const personnelId = Number(id);
@@ -816,7 +838,7 @@ app.put('/api/personnel/:id', authenticateToken, (req, res) => {
   });
 });
 
-app.delete('/api/personnel/:id', authenticateToken, (req, res) => {
+app.delete('/api/personnel/:id', authenticateToken, authorizeRoles('superadmin'), (req, res) => {
   const { id } = req.params;
   db.run('UPDATE personnel SET is_active = 0 WHERE id = ?', [id], function(err) {
     if (err) {
@@ -847,7 +869,7 @@ app.get('/api/business-expenses', authenticateToken, (req, res) => {
   });
 });
 
-app.post('/api/business-expenses', authenticateToken, (req, res) => {
+app.post('/api/business-expenses', authenticateToken, authorizeRoles('superadmin'), (req, res) => {
   const { expense_name, expense_date, amount } = req.body;
   const date = new Date(expense_date);
   const month = date.getMonth() + 1;
@@ -862,7 +884,7 @@ app.post('/api/business-expenses', authenticateToken, (req, res) => {
   });
 });
 
-app.put('/api/business-expenses/:id', authenticateToken, (req, res) => {
+app.put('/api/business-expenses/:id', authenticateToken, authorizeRoles('superadmin'), (req, res) => {
   const { id } = req.params;
   const { expense_name, expense_date, amount } = req.body;
   const name = (expense_name || '').trim();
@@ -891,7 +913,7 @@ app.put('/api/business-expenses/:id', authenticateToken, (req, res) => {
   );
 });
 
-app.delete('/api/business-expenses/:id', authenticateToken, (req, res) => {
+app.delete('/api/business-expenses/:id', authenticateToken, authorizeRoles('superadmin'), (req, res) => {
   const { id } = req.params;
 
   db.run('DELETE FROM business_expenses WHERE id = ?', [id], function(err) {
@@ -915,7 +937,7 @@ app.delete('/api/business-expenses/:id', authenticateToken, (req, res) => {
     });
   });
 
-  app.post('/api/stock-codes', authenticateToken, (req, res) => {
+  app.post('/api/stock-codes', authenticateToken, authorizeRoles('superadmin'), (req, res) => {
   const { product_name, brand, unit } = req.body;
 
   const reuseSql = "SELECT id, stock_code FROM stock_codes WHERE is_active = 0 ORDER BY CAST(SUBSTR(stock_code, 4) AS INTEGER) DESC, id DESC LIMIT 1";
@@ -968,7 +990,7 @@ app.delete('/api/business-expenses/:id', authenticateToken, (req, res) => {
 });
 
   // Update a stock code
-  app.put('/api/stock-codes/:id', authenticateToken, (req, res) => {
+  app.put('/api/stock-codes/:id', authenticateToken, authorizeRoles('superadmin'), (req, res) => {
     const { id } = req.params;
     const { product_name, brand, unit } = req.body;
     db.run('UPDATE stock_codes SET product_name = ?, brand = ?, unit = ? WHERE id = ?',
@@ -984,28 +1006,10 @@ app.delete('/api/business-expenses/:id', authenticateToken, (req, res) => {
   });
 
   // Soft delete a stock code
-  app.delete('/api/stock-codes/:id', authenticateToken, (req, res) => {
+  app.delete('/api/stock-codes/:id', authenticateToken, authorizeRoles('superadmin'), (req, res) => {
     const { id } = req.params;
     db.run('UPDATE stock_codes SET is_active = 0 WHERE id = ?', [id], function(err) {
       if (err) {
-        // In rare case of race causing duplicate, try next few codes quickly
-        if (err.code === 'SQLITE_CONSTRAINT') {
-          let num = nextNum + 1;
-          const tryNext = () => {
-            const code = `GDK${String(num).padStart(4, '0')}`;
-            db.run('INSERT INTO stock_codes (stock_code, product_name, brand, unit) VALUES (?, ?, ?, ?)',
-              [code, product_name, brand || '', unit], function(e2) {
-                if (e2 && e2.code === 'SQLITE_CONSTRAINT' && num < nextNum + 10) {
-                  num += 1; tryNext();
-                } else if (e2) {
-                  return res.status(500).json({ error: e2.message });
-                } else {
-                  return res.json({ id: this.lastID, stock_code: code, product_name, brand, unit });
-                }
-              });
-          };
-          return tryNext();
-        }
         return res.status(500).json({ error: err.message });
       }
       if (this.changes === 0) {
@@ -1028,7 +1032,7 @@ app.get('/api/stock-purchases', authenticateToken, (req, res) => {
   });
 });
 
-app.post('/api/stock-purchases', authenticateToken, (req, res) => {
+app.post('/api/stock-purchases', authenticateToken, authorizeRoles('admin','superadmin'), (req, res) => {
   const { stock_code_id, package_count, package_content, total_price, purchase_date } = req.body;
   
   // Calculate unit_price and per_item_price
@@ -1056,7 +1060,7 @@ app.post('/api/stock-purchases', authenticateToken, (req, res) => {
     });
 });
 
-app.delete('/api/stock-purchases/:id', authenticateToken, (req, res) => {
+app.delete('/api/stock-purchases/:id', authenticateToken, authorizeRoles('superadmin'), (req, res) => {
   const { id } = req.params;
   db.run('DELETE FROM stock_purchases WHERE id = ?', [id], function(err) {
     if (err) {
@@ -1126,7 +1130,7 @@ app.get('/api/product-prices/:id/history', (req, res) => {
   });
 });
 
-app.post('/api/product-prices', authenticateToken, (req, res) => {
+app.post('/api/product-prices', authenticateToken, authorizeRoles('superadmin'), (req, res) => {
   const { product_name, category, price, effective_date } = req.body;
   
   db.run(`INSERT INTO product_prices (product_name, category, price, effective_date) 
@@ -1145,7 +1149,7 @@ app.post('/api/product-prices', authenticateToken, (req, res) => {
   });
 });
 
-app.put('/api/product-prices/:id', authenticateToken, (req, res) => {
+app.put('/api/product-prices/:id', authenticateToken, authorizeRoles('superadmin'), (req, res) => {
   const { id } = req.params;
   const { price, effective_date } = req.body;
 
@@ -1175,7 +1179,7 @@ app.put('/api/product-prices/:id', authenticateToken, (req, res) => {
 });
 
 // Delete a product price entry (removes a single history row)
-app.delete('/api/product-prices/:id', authenticateToken, (req, res) => {
+app.delete('/api/product-prices/:id', authenticateToken, authorizeRoles('superadmin'), (req, res) => {
   const { id } = req.params;
   db.run('DELETE FROM product_prices WHERE id = ?', [id], function(err) {
     if (err) {
@@ -1233,7 +1237,7 @@ app.get('/api/product-costs/:productName', authenticateToken, (req, res) => {
   });
 });
 
-app.put('/api/product-costs/:productName', authenticateToken, (req, res) => {
+app.put('/api/product-costs/:productName', authenticateToken, authorizeRoles('superadmin'), (req, res) => {
   const { productName } = req.params;
   const payload = req.body || {};
   const notes = typeof payload.notes === 'string' ? payload.notes : '';
@@ -1830,7 +1834,7 @@ app.get('/api/pos-layout', (req, res) => {
   });
 });
 
-app.put('/api/pos-layout', express.json(), (req, res) => {
+app.put('/api/pos-layout', authenticateToken, authorizeRoles('superadmin'), express.json(), (req, res) => {
   const payload = req.body || {};
   const positionsLocked = Boolean(payload.positionsLocked);
   const productOrder = payload.productOrder && typeof payload.productOrder === 'object' ? payload.productOrder : {};
@@ -2085,7 +2089,7 @@ app.get('/api/analytics/forecast', authenticateToken, (req, res) => {
 });
 
 // Trigger model training on demand
-app.post('/api/analytics/train', authenticateToken, (req, res) => {
+app.post('/api/analytics/train', authenticateToken, authorizeRoles('superadmin'), (req, res) => {
   trainForecastModel((err, model) => {
     if (err) return res.status(500).json({ error: err.message || String(err) });
     res.json({ message: 'trained', stats: { mse: model.mse, mae: model.mae, samples: model.samples } });
@@ -2125,7 +2129,7 @@ app.get('/api/daily-closings', authenticateToken, (req, res) => {
 });
 
 // Cleanup daily closings for a given period (month/year or start/end)
-app.post('/api/daily-closings/cleanup', authenticateToken, (req, res) => {
+app.post('/api/daily-closings/cleanup', authenticateToken, authorizeRoles('superadmin'), (req, res) => {
   const body = req.body || {};
   const { month, year, start, end } = body;
   let sql = '';

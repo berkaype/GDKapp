@@ -9,6 +9,10 @@ export default function StockPurchase() {
   const [form, setForm] = useState({ selected:null, purchase_date: new Date().toISOString().split('T')[0], package_count:'', package_content:'', total_price:'' });
   const [q, setQ] = useState('');
   const [results, setResults] = useState([]);
+  const userRole = (() => {
+    try { return JSON.parse(localStorage.getItem('user'))?.role || null; } catch { return null; }
+  })();
+  const isSuperAdmin = userRole === 'superadmin';
 
   const load = async () => { try { const r = await fetch(`${API_BASE}/stock-purchases`, { headers: authHeaders() }); if (r.ok) setRows(await r.json()); } catch(e){ console.error(e);} };
   useEffect(()=>{ load(); },[]);
@@ -116,7 +120,11 @@ export default function StockPurchase() {
                   <div className="text-xs text-gray-500">{p.unit}: {formatCurrency(p.per_item_price)}</div>
                 </td>
                 <td className="py-2">{new Date(p.purchase_date).toLocaleDateString('tr-TR')}</td>
-                <td className="py-2 text-right"><button onClick={()=>del(p.id)} className="text-red-600">Sil</button></td>
+                <td className="py-2 text-right">
+                  {isSuperAdmin ? (
+                    <button onClick={()=>del(p.id)} className="text-red-600">Sil</button>
+                  ) : null}
+                </td>
               </tr>
             ))}
           </tbody>
