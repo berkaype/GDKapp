@@ -1155,7 +1155,7 @@ app.put('/api/product-prices/:id', authenticateToken, authorizeRoles('superadmin
 
   const normalizedPrice = Number(price);
   if (Number.isNaN(normalizedPrice) || normalizedPrice <= 0) {
-    return res.status(400).json({ error: 'Geçersiz fiyat' });
+    return res.status(400).json({ error: 'GeÃ§ersiz fiyat' });
   }
 
   db.run(`UPDATE product_prices
@@ -1671,7 +1671,7 @@ app.post('/api/orders/:orderId/partial-payment', (req, res) => {
   const { items, amount, payment, change, table_number, order_type, description } = req.body || {};
 
   if (!Array.isArray(items) || !items.length) {
-    return res.status(400).json({ error: 'Parça ödeme için geçersiz ürün listesi' });
+    return res.status(400).json({ error: 'ParÃ§a Ã¶deme iÃ§in geÃ§ersiz Ã¼rÃ¼n listesi' });
   }
 
   const sanitizedItems = items
@@ -1688,7 +1688,7 @@ app.post('/api/orders/:orderId/partial-payment', (req, res) => {
     .filter(Boolean);
 
   if (!sanitizedItems.length) {
-    return res.status(400).json({ error: 'Parça ödeme için geçersiz ürün bilgisi' });
+    return res.status(400).json({ error: 'ParÃ§a Ã¶deme iÃ§in geÃ§ersiz Ã¼rÃ¼n bilgisi' });
   }
 
   const computedTotal = sanitizedItems.reduce((sum, item) => sum + item.total_price, 0);
@@ -1709,7 +1709,7 @@ app.post('/api/orders/:orderId/partial-payment', (req, res) => {
 
     const baseTable = table_number != null ? table_number : orderRow.table_number;
     const baseType = order_type || orderRow.order_type;
-    const paymentDescription = description || `Parça ödeme #${orderId}`;
+    const paymentDescription = description || `ParÃ§a Ã¶deme #${orderId}`;
 
     db.serialize(() => {
       db.run('BEGIN TRANSACTION');
@@ -1778,7 +1778,7 @@ app.post('/api/maintenance/cleanup-prices', authenticateToken, (req, res) => {
         if (commitErr) {
           return res.status(500).json({ error: commitErr.message });
         }
-        res.json({ message: 'Fazla fiyat geçmişi temizlendi.' });
+        res.json({ message: 'Fazla fiyat geÃ§miÅŸi temizlendi.' });
       });
     });
   });
@@ -1800,17 +1800,46 @@ function updateOrderTotal(orderId) {
   });
 }
 
-// Daily Revenue
+// Daily Revenue (sum of closed orders' totals, unaccounted)
 app.get('/api/daily-revenue', (req, res) => {
   const today = new Date().toISOString().split('T')[0];
-  db.get('SELECT SUM(COALESCE(payment_received, 0) - COALESCE(change_given, 0)) as daily_revenue FROM orders WHERE DATE(order_date) = ? AND is_closed = 1 AND (accounted = 0 OR accounted IS NULL)',
-    [today], (err, row) => {
+  const sql = `SELECT COALESCE(SUM(total_amount), 0) AS daily_revenue
+               FROM orders
+               WHERE DATE(order_date) = date(?)
+                 AND is_closed = 1
+                 AND (accounted = 0 OR accounted IS NULL)`;
+  db.get(sql, [today], (err, row) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
-    res.json({ daily_revenue: (row && row.daily_revenue) ? row.daily_revenue : 0 });
+    res.json({ daily_revenue: Number(row?.daily_revenue || 0) });
   });
 });
+
+const isValidHexColor = (value) => typeof value === 'string' && /^#[0-9A-Fa-f]{6}$/.test(value);
+
+function sanitizeProductStyles(styles) {
+  if (!styles || typeof styles !== 'object') {
+    return {};
+  }
+  const result = {};
+  Object.entries(styles).forEach(([key, style]) => {
+    if (!style || typeof style !== 'object') {
+      return;
+    }
+    const entry = {};
+    if (isValidHexColor(style.background)) {
+      entry.background = style.background.toUpperCase();
+    }
+    if (isValidHexColor(style.text)) {
+      entry.text = style.text.toUpperCase();
+    }
+    if (Object.keys(entry).length) {
+      result[key] = entry;
+    }
+  });
+  return result;
+}
 
 // POS layout settings (global)
 app.get('/api/pos-layout', (req, res) => {
@@ -1819,7 +1848,7 @@ app.get('/api/pos-layout', (req, res) => {
       return res.status(500).json({ error: err.message });
     }
     if (!row || !row.value) {
-      return res.json({ positionsLocked: true, productOrder: {}, categoryOrder: [] });
+      return res.json({ positionsLocked: true, productOrder: {}, categoryOrder: [], productStyles: {} });
     }
     try {
       const parsed = JSON.parse(row.value);
@@ -1827,6 +1856,7 @@ app.get('/api/pos-layout', (req, res) => {
         positionsLocked: Boolean(parsed.positionsLocked),
         productOrder: parsed.productOrder && typeof parsed.productOrder === 'object' ? parsed.productOrder : {},
         categoryOrder: Array.isArray(parsed.categoryOrder) ? parsed.categoryOrder : [],
+        productStyles: sanitizeProductStyles(parsed.productStyles),
       });
     } catch (e) {
       res.status(500).json({ error: 'invalid-layout-json' });
@@ -1839,7 +1869,8 @@ app.put('/api/pos-layout', authenticateToken, authorizeRoles('superadmin'), expr
   const positionsLocked = Boolean(payload.positionsLocked);
   const productOrder = payload.productOrder && typeof payload.productOrder === 'object' ? payload.productOrder : {};
   const categoryOrder = Array.isArray(payload.categoryOrder) ? payload.categoryOrder : [];
-  const value = JSON.stringify({ positionsLocked, productOrder, categoryOrder });
+  const productStyles = sanitizeProductStyles(payload.productStyles);
+  const value = JSON.stringify({ positionsLocked, productOrder, categoryOrder, productStyles });
   db.run(
     `INSERT INTO app_settings (key, value, updated_at) VALUES ('pos_layout', ?, CURRENT_TIMESTAMP)
      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`,
@@ -1849,6 +1880,66 @@ app.put('/api/pos-layout', authenticateToken, authorizeRoles('superadmin'), expr
         return res.status(500).json({ error: err.message });
       }
       res.json({ success: true });
+    }
+  );
+});
+
+// Table names settings
+function defaultTableNames() {
+  return Array.from({ length: 8 }, (_, i) => ({ id: i + 1, name: `Masa ${i + 1}` }));
+}
+
+app.get('/api/table-names', (req, res) => {
+  db.get('SELECT value FROM app_settings WHERE key = ?', ['table_names'], (err, row) => {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    if (!row || !row.value) {
+      return res.json({ tables: defaultTableNames() });
+    }
+    try {
+      const parsed = JSON.parse(row.value);
+      const list = Array.isArray(parsed?.tables) ? parsed.tables : defaultTableNames();
+      res.json({ tables: list });
+    } catch (e) {
+      res.status(500).json({ error: 'invalid-table-names-json' });
+    }
+  });
+});
+
+app.put('/api/table-names', authenticateToken, authorizeRoles('superadmin'), express.json(), (req, res) => {
+  const payload = req.body || {};
+  const arr = Array.isArray(payload.tables) ? payload.tables : null;
+  if (!arr) {
+    return res.status(400).json({ error: 'tables must be an array' });
+  }
+  const cleaned = [];
+  const seen = new Set();
+  for (const item of arr) {
+    if (!item) continue;
+    const id = Number(item.id);
+    if (!Number.isInteger(id) || id <= 0 || id > 200) continue;
+    if (seen.has(id)) continue;
+    const raw = typeof item.name === 'string' ? item.name : '';
+    const name = raw.trim().slice(0, 64);
+    cleaned.push({ id, name: name || `Masa ${id}` });
+    seen.add(id);
+  }
+  if (!cleaned.length) {
+    return res.status(400).json({ error: 'no-valid-tables' });
+  }
+  cleaned.sort((a, b) => a.id - b.id);
+
+  const value = JSON.stringify({ tables: cleaned });
+  db.run(
+    `INSERT INTO app_settings (key, value, updated_at) VALUES ('table_names', ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`,
+    [value],
+    function(err) {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      res.json({ tables: cleaned });
     }
   );
 });
@@ -2075,7 +2166,7 @@ app.get('/api/analytics/forecast', authenticateToken, (req, res) => {
           }
         }
         const pad = (n) => String(n).padStart(2, '0');
-        const rec = `Expect ${(bestScore > 0 ? 'higher' : 'low')} traffic between ${pad(bestStart)}:00–${pad((bestStart + 2) % 24)}:00.`;
+        const rec = `Expect ${(bestScore > 0 ? 'higher' : 'low')} traffic between ${pad(bestStart)}:00â€“${pad((bestStart + 2) % 24)}:00.`;
 
         res.json({
           window: { start: startParam, end: endParam, days },
@@ -2165,7 +2256,7 @@ app.post('/api/end-of-day', authenticateToken, (req, res) => {
           if (uErr) { return res.status(500).json({ error: uErr.message }); }
           db.run('UPDATE orders SET is_closed = 1, payment_received = COALESCE(payment_received, total_amount), change_given = COALESCE(change_given, 0), accounted = 1 WHERE DATE(order_date) = ? AND is_closed = 0', [today], (u2Err) => {
             if (u2Err) { return res.status(500).json({ error: u2Err.message }); }
-            res.json({ message: 'Günsonu alındı', archived_amount: total });
+            res.json({ message: 'GÃ¼nsonu alÄ±ndÄ±', archived_amount: total });
           });
         });
       });

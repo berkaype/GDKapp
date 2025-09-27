@@ -4,12 +4,30 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Bufe Yonetim Sistemi</title>
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' http://localhost:3001 ws:; img-src 'self' data: blob:; font-src 'self' data:" />
-    <script type="module" crossorigin src="/assets/index-BttOx5aE.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-Cm3q8eIZ.css">
+    <!-- CSP temporarily removed for debugging blank-screen issue -->
+    <script type="module" crossorigin src="/assets/index-BCHfetxX.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-vdL3D5Ge.css">
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      // Basic runtime error surfacing to avoid blank screen during dev
+      (function(){
+        function show(msg, stack){
+          try{
+            var el = document.getElementById('root');
+            if(el && !el.__hasError){
+              el.__hasError = true;
+              el.style.fontFamily = 'system-ui, sans-serif';
+              el.style.padding = '16px';
+              el.innerText = String(msg || 'Unknown error') + (stack ? "\n\n" + stack : '');
+            }
+          }catch(_e){}
+        }
+        window.addEventListener('error', function(e){ show('JS error: ' + (e && (e.message || (e.error && e.error.message))), (e && e.error && e.error.stack) || (e && e.filename+':'+e.lineno+':'+e.colno)); });
+        window.addEventListener('unhandledrejection', function(e){ var r=e&&e.reason; show('Promise error: ' + (r && (r.message || r)), (r && r.stack) || ''); });
+      })();
+    </script>
   </body>
 </html>
 
