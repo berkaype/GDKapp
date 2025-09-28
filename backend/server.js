@@ -2044,6 +2044,139 @@ app.get('/api/analytics/daily', authenticateToken, (req, res) => {
   });
 });
 
+
+// Analytics: Monthly product cost summary
+app.get('/api/analytics/monthly-product-cost', authenticateToken, (req, res) => {
+  const now = new Date();
+  let { month, year } = req.query || {};
+  const parsedMonth = Number(month);
+  if (!parsedMonth || parsedMonth < 1 || parsedMonth > 12) {
+    month = String(now.getMonth() + 1).padStart(2, '0');
+  } else {
+    month = String(parsedMonth).padStart(2, '0');
+  }
+  const parsedYear = Number(year);
+  if (!parsedYear || parsedYear < 2000 || parsedYear > 9999) {
+    year = String(now.getFullYear());
+  } else {
+    year = String(parsedYear);
+  }
+
+  const salesSql = `
+    SELECT
+      COALESCE(oi.product_name, 'Diğer Ürün') AS product_name,
+      SUM(oi.quantity) AS quantity,
+      SUM(oi.total_price) AS revenue
+    FROM order_items oi
+    INNER JOIN orders o ON o.id = oi.order_id
+    WHERE strftime('%m', o.order_date) = ? AND strftime('%Y', o.order_date) = ?
+    GROUP BY product_name
+    ORDER BY revenue DESC, quantity DESC, product_name ASC`;
+
+  db.all(salesSql, [month, year], (salesErr, salesRows = []) => {
+    if (salesErr) {
+      return res.status(500).json({ error: salesErr.message });
+    }
+    loadProductCostRecipes(null, (recipesErr, recipeList) => {
+      if (recipesErr) {
+        return res.status(500).json({ error: recipesErr.message });
+      }
+
+      const costMap = new Map();
+      if (Array.isArray(recipeList)) {
+        recipeList.forEach((recipe) => {
+          const name = (recipe?.product_name || '').trim();
+          if (!name) {
+            return;
+          }
+          const normalized = name.toLowerCase();
+          const costValue = Number(recipe?.total_cost);
+          if (Number.isFinite(costValue)) {
+            costMap.set(normalized, costValue);
+          }
+        });
+      }
+
+      const items = [];
+      let totalQuantity = 0;
+      let totalRevenue = 0;
+      let totalCost = 0;
+      let totalGrossProfit = 0;
+      let revenueWithCost = 0;
+      let revenueWithoutCost = 0;
+      const missingSet = new Set();
+
+      (salesRows || []).forEach((row) => {
+        const productName = row?.product_name ? String(row.product_name) : 'Tanımsız Ürün';
+        const quantity = Number(row?.quantity || 0);
+        const revenue = Number(row?.revenue || 0);
+
+        totalQuantity += quantity;
+        totalRevenue += revenue;
+
+        const normalizedName = productName.trim().toLowerCase();
+        const hasCost = normalizedName ? costMap.has(normalizedName) : false;
+        const unitCost = hasCost ? Number(costMap.get(normalizedName)) : null;
+
+        let totalCostForItem = null;
+        let grossProfitForItem = null;
+        let marginForItem = null;
+
+        if (hasCost) {
+          const rawTotalCost = unitCost * quantity;
+          totalCostForItem = Number(rawTotalCost.toFixed(2));
+          const rawGrossProfit = revenue - rawTotalCost;
+          grossProfitForItem = Number(rawGrossProfit.toFixed(2));
+          if (revenue > 0) {
+            marginForItem = Number(((rawGrossProfit / revenue) * 100).toFixed(2));
+          }
+          totalCost += rawTotalCost;
+          totalGrossProfit += rawGrossProfit;
+          revenueWithCost += revenue;
+        } else {
+          revenueWithoutCost += revenue;
+          if (productName.trim()) {
+            missingSet.add(productName.trim());
+          }
+        }
+
+        const unitPrice = quantity > 0 ? Number((revenue / quantity).toFixed(2)) : null;
+        const reportedUnitCost = unitCost !== null && Number.isFinite(unitCost) ? Number(unitCost.toFixed(4)) : null;
+
+        items.push({
+          product: productName,
+          quantity,
+          revenue: Number(revenue.toFixed(2)),
+          unitPrice,
+          unitCost: reportedUnitCost,
+          totalCost: totalCostForItem,
+          grossProfit: grossProfitForItem,
+          margin: marginForItem,
+          hasCost,
+        });
+      });
+
+      const totals = {
+        quantity: totalQuantity,
+        revenue: Number(totalRevenue.toFixed(2)),
+        cost: Number(totalCost.toFixed(2)),
+        grossProfit: Number(totalGrossProfit.toFixed(2)),
+        margin: revenueWithCost > 0 ? Number(((totalGrossProfit / revenueWithCost) * 100).toFixed(2)) : null,
+        revenueWithCost: Number(revenueWithCost.toFixed(2)),
+        revenueWithoutCost: Number(revenueWithoutCost.toFixed(2)),
+      };
+
+      res.json({
+        month,
+        year,
+        items,
+        totals,
+        missingRecipes: Array.from(missingSet.values()),
+      });
+    });
+  });
+});
+
 // Analytics: Weekly summary (by day, WoW trends)
 app.get('/api/analytics/weekly', authenticateToken, (req, res) => {
   const endParam = (req.query.end || new Date().toISOString().split('T')[0]).slice(0, 10);

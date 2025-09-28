@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { ChevronLeft, Users, DollarSign, Package, BarChart3, Settings, LogOut, Lock, Calculator } from 'lucide-react';
+import { ChevronLeft, Users, DollarSign, Package, BarChart3, Settings, LogOut, Lock, Calculator, Coins } from 'lucide-react';
 
 import POS from './pages/POS.jsx';
 import Personnel from './pages/Personnel.jsx';
@@ -12,6 +12,7 @@ import PerformansTakibi from './pages/PerformansTakibi.jsx';
 import CiroGecmisi from './pages/CiroGecmisi.jsx';
 import VeriYazdirma from './pages/VeriYazdirma.jsx';
 import MaliyetHesaplama from './pages/MaliyetHesaplama.jsx';
+import AylikMasraf from './pages/AylikMasraf.jsx';
 const TableNames = React.lazy(() => import('./pages/TableNames.jsx'));
 import { formatCurrency } from './utils/format.js';
 import { getApiBase } from './utils/api.js';
@@ -236,8 +237,9 @@ export default function App() {
                 { id: 'stock-purchase', label: 'Stok Güncelleme', icon: Package },
                 { id: 'product-prices', label: 'Ürün Fiyatları', icon: Settings },
                 { id: 'costing', label: 'Maliyet Hesaplama', icon: Calculator },
+                { id: 'monthly-cost', label: 'Aylık Masraf', icon: Coins },
                 { id: 'reports', label: 'Ciro ve Net Kar Raporu', icon: BarChart3 },
-                                { id: 'performance', label: 'Performans Takibi', icon: BarChart3 },
+                { id: 'performance', label: 'Performans Takibi', icon: BarChart3 },
                 { id: 'closings', label: 'Ciro Geçmişi', icon: BarChart3 },
                 { id: 'export', label: 'Veri Yazdırma', icon: BarChart3 },
               ].filter(item => !isJuniorAdmin || item.id === 'stock-purchase').map(({ id, label, icon: Icon }) => (
@@ -275,6 +277,7 @@ export default function App() {
               </React.Suspense>
             )}
             {effectivePage === 'costing' && <MaliyetHesaplama />}
+            {effectivePage === 'monthly-cost' && <AylikMasraf />}
             {effectivePage === 'reports' && <Reports />}
             {effectivePage === 'performance' && <PerformansTakibi />}
             {effectivePage === 'closings' && <CiroGecmisi />}
