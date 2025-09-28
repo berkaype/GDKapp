@@ -2637,22 +2637,73 @@ app.get('/api/daily-closings', authenticateToken, (req, res) => {
 app.post('/api/daily-closings/cleanup', authenticateToken, authorizeRoles('superadmin'), (req, res) => {
   const body = req.body || {};
   const { month, year, start, end } = body;
-  let sql = '';
-  let params = [];
+
+  let closingSql = '';
+  let orderingSql = '';
+  let closingParams = [];
+  let orderParams = [];
+
   if (month && year) {
-    sql = 'DELETE FROM daily_closings WHERE strftime("%m", closing_date) = ? AND strftime("%Y", closing_date) = ?';
-    params = [String(month).padStart(2, '0'), String(year)];
+    const monthStr = String(month).padStart(2, '0');
+    const yearStr = String(year);
+    closingSql = 'strftime("%m", closing_date) = ? AND strftime("%Y", closing_date) = ?';
+    orderingSql = 'strftime("%m", order_date) = ? AND strftime("%Y", order_date) = ?';
+    closingParams = [monthStr, yearStr];
+    orderParams = [monthStr, yearStr];
   } else if (start && end) {
-    sql = 'DELETE FROM daily_closings WHERE date(closing_date) BETWEEN date(?) AND date(?)';
-    params = [start, end];
+    closingSql = 'date(closing_date) BETWEEN date(?) AND date(?)';
+    orderingSql = 'date(order_date) BETWEEN date(?) AND date(?)';
+    closingParams = [start, end];
+    orderParams = [start, end];
   } else {
     return res.status(400).json({ error: 'invalid-range' });
   }
-  db.run(sql, params, function(err) {
-    if (err) {
-      return res.status(500).json({ error: err.message });
-    }
-    res.json({ deleted: this.changes || 0 });
+
+  const deleteClosingsSql = `DELETE FROM daily_closings WHERE ${closingSql}`;
+  const deleteOrderItemsSql = `DELETE FROM order_items WHERE order_id IN (SELECT id FROM orders WHERE ${orderingSql})`;
+  const deleteOrdersSql = `DELETE FROM orders WHERE ${orderingSql}`;
+
+  db.serialize(() => {
+    let closingsDeleted = 0;
+    let orderItemsDeleted = 0;
+    let ordersDeleted = 0;
+
+    const rollback = (err) => {
+      db.run('ROLLBACK', () => {
+        res.status(500).json({ error: err.message || String(err) });
+      });
+    };
+
+    db.run('BEGIN TRANSACTION');
+
+    db.run(deleteClosingsSql, closingParams, function(err) {
+      if (err) return rollback(err);
+      closingsDeleted = this.changes || 0;
+
+      db.run(deleteOrderItemsSql, orderParams, function(err2) {
+        if (err2) return rollback(err2);
+        orderItemsDeleted = this.changes || 0;
+
+        db.run(deleteOrdersSql, orderParams, function(err3) {
+          if (err3) return rollback(err3);
+          ordersDeleted = this.changes || 0;
+
+          db.run('COMMIT', (commitErr) => {
+            if (commitErr) return rollback(commitErr);
+            try {
+              scheduleTrain();
+            } catch (e) {
+              console.error('schedule-train-error', e.message);
+            }
+            res.json({
+              dailyClosingsDeleted: closingsDeleted,
+              orderItemsDeleted,
+              ordersDeleted,
+            });
+          });
+        });
+      });
+    });
   });
 });
 
