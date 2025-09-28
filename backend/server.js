@@ -5,6 +5,7 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const path = require('path');
 const fs = require('fs');
+const https = require('https');
 require('dotenv').config();
 
 const isPkg = typeof process.pkg !== 'undefined';
@@ -27,6 +28,10 @@ const publicDir = path.join(__dirname, 'public');
 const app = express();
 const PORT = process.env.PORT || 3001;
 const JWT_SECRET = process.env.JWT_SECRET || 'bufe_secret_key_2024';
+const WEATHER_PROVIDER = process.env.WEATHER_PROVIDER || 'open-meteo';
+const WEATHER_LAT = parseFloat(process.env.WEATHER_LAT || '41.015137');
+const WEATHER_LON = parseFloat(process.env.WEATHER_LON || '28.979530');
+const WEATHER_TIMEZONE = process.env.WEATHER_TIMEZONE || 'auto';
 
 // Middleware
 app.use(cors());
@@ -183,6 +188,17 @@ function initializeDatabase() {
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (recipe_id) REFERENCES product_cost_recipes(id) ON DELETE CASCADE,
     FOREIGN KEY (stock_code_id) REFERENCES stock_codes(id)
+  )`);
+
+  db.run(`CREATE TABLE IF NOT EXISTS weather_daily (
+    date TEXT PRIMARY KEY,
+    t_min REAL,
+    t_max REAL,
+    precipitation REAL,
+    precipitation_probability REAL,
+    weather_code INTEGER,
+    source TEXT,
+    fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
 
   // App settings (key-value JSON store)
@@ -345,6 +361,151 @@ function cleanupDuplicates() {
   )`);
 }
 
+// ===== Weather helpers for customer forecast =====
+
+function fetchJSON(url, callback) {
+  const req = https.get(url, (res) => {
+    const statusCode = res.statusCode || 0;
+    if (statusCode >= 400) {
+      res.resume();
+      return callback && callback(new Error(`weather-http-${statusCode}`));
+    }
+    let raw = '';
+    res.setEncoding('utf8');
+    res.on('data', (chunk) => {
+      raw += chunk;
+    });
+    res.on('end', () => {
+      try {
+        const json = JSON.parse(raw);
+        callback && callback(null, json);
+      } catch (err) {
+        callback && callback(err);
+      }
+    });
+  });
+  req.on('error', (err) => callback && callback(err));
+}
+
+function upsertWeatherRecords(records, callback) {
+  if (!records || !records.length) return callback && callback(null);
+  db.serialize(() => {
+    db.run('BEGIN TRANSACTION');
+    const stmt = db.prepare(`INSERT INTO weather_daily (date, t_min, t_max, precipitation, precipitation_probability, weather_code, source, fetched_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(date) DO UPDATE SET
+        t_min = excluded.t_min,
+        t_max = excluded.t_max,
+        precipitation = excluded.precipitation,
+        precipitation_probability = excluded.precipitation_probability,
+        weather_code = excluded.weather_code,
+        source = excluded.source,
+        fetched_at = CURRENT_TIMESTAMP`);
+    records.forEach((row) => {
+      stmt.run([
+        row.date,
+        row.t_min,
+        row.t_max,
+        row.precipitation,
+        row.precipitation_probability,
+        row.weather_code,
+        row.source || WEATHER_PROVIDER,
+      ]);
+    });
+    stmt.finalize((err) => {
+      if (err) {
+        db.run('ROLLBACK');
+        return callback && callback(err);
+      }
+      db.run('COMMIT', callback);
+    });
+  });
+}
+
+function fetchOpenMeteoRange(startDate, endDate, callback, options = {}) {
+  if (WEATHER_PROVIDER !== 'open-meteo') return callback && callback(null, []);
+  const lat = Number.isFinite(WEATHER_LAT) ? WEATHER_LAT : 0;
+  const lon = Number.isFinite(WEATHER_LON) ? WEATHER_LON : 0;
+  const dailyParams = 'temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_mean,weathercode';
+  const base = options.forecast
+    ? 'https://api.open-meteo.com/v1/forecast'
+    : 'https://archive-api.open-meteo.com/v1/era5';
+  const url = `${base}?latitude=${lat}&longitude=${lon}&daily=${dailyParams}&start_date=${startDate}&end_date=${endDate}&timezone=${encodeURIComponent(WEATHER_TIMEZONE)}`;
+  fetchJSON(url, (err, data) => {
+    if (err) return callback && callback(err);
+    if (!data || !data.daily || !Array.isArray(data.daily.time)) {
+      return callback && callback(new Error('weather-data-missing'));
+    }
+    const rows = data.daily.time.map((date, idx) => ({
+      date,
+      t_min: Number(data.daily.temperature_2m_min?.[idx] ?? 0),
+      t_max: Number(data.daily.temperature_2m_max?.[idx] ?? 0),
+      precipitation: Number(data.daily.precipitation_sum?.[idx] ?? 0),
+      precipitation_probability: Number(
+        data.daily.precipitation_probability_mean?.[idx] ??
+        data.daily.precipitation_probability_max?.[idx] ??
+        0,
+      ),
+      weather_code: Number(data.daily.weathercode?.[idx] ?? 0),
+      source: 'open-meteo',
+    }));
+    callback && callback(null, rows);
+  });
+}
+
+function ensureWeatherDataRange(startDate, endDate, callback) {
+  if (!startDate || !endDate || WEATHER_PROVIDER !== 'open-meteo') {
+    return callback && callback(null);
+  }
+  db.all('SELECT date FROM weather_daily WHERE date BETWEEN ? AND ?', [startDate, endDate], (err, rows) => {
+    if (err) return callback && callback(err);
+    const have = new Set((rows || []).map((r) => r.date));
+    const missing = [];
+    for (let d = new Date(startDate + 'T00:00:00'); d <= new Date(endDate + 'T00:00:00'); d.setDate(d.getDate() + 1)) {
+      const iso = d.toISOString().split('T')[0];
+      if (!have.has(iso)) missing.push(iso);
+    }
+    if (!missing.length) return callback && callback(null);
+    const missingStart = missing[0];
+    const missingEnd = missing[missing.length - 1];
+    fetchOpenMeteoRange(missingStart, missingEnd, (fetchErr, records) => {
+      if (fetchErr) return callback && callback(fetchErr);
+      upsertWeatherRecords(records, callback);
+    });
+  });
+}
+
+function refreshWeatherForecast(callback) {
+  if (WEATHER_PROVIDER !== 'open-meteo') return callback && callback(null);
+  const today = new Date();
+  const start = today.toISOString().split('T')[0];
+  const future = new Date(today);
+  future.setDate(future.getDate() + 6);
+  const end = future.toISOString().split('T')[0];
+  fetchOpenMeteoRange(start, end, (err, rows) => {
+    if (err) return callback && callback(err);
+    upsertWeatherRecords(rows, callback);
+  }, { forecast: true });
+}
+
+function getWeatherMap(startDate, endDate, callback) {
+  if (!startDate || !endDate) return callback && callback(null, new Map());
+  db.all('SELECT date, t_min, t_max, precipitation, precipitation_probability, weather_code FROM weather_daily WHERE date BETWEEN ? AND ?', [startDate, endDate], (err, rows) => {
+    if (err) return callback && callback(err);
+    const map = new Map();
+    (rows || []).forEach((row) => {
+      map.set(row.date, {
+        t_min: Number(row.t_min ?? 0),
+        t_max: Number(row.t_max ?? 0),
+        precipitation: Number(row.precipitation ?? 0),
+        precipitation_probability: Number(row.precipitation_probability ?? 0),
+        weather_code: Number(row.weather_code ?? 0),
+      });
+    });
+    callback && callback(null, map);
+  });
+}
+
 // ===== ML: Simple Ridge Regression for expected customers (transactions) =====
 function getDailyAggregates(callback) {
   const sql = `SELECT date(order_date) AS d,
@@ -366,7 +527,7 @@ function oneHot(index, length) {
   return v;
 }
 
-function buildDailyDataset(days) {
+function buildDailyDataset(days, weatherMap = new Map()) {
   // days: [{date, transactions}...] sorted ASC by date
   const map = new Map(days.map(d => [d.date, d]));
   const getTx = (dateStr) => (map.get(dateStr)?.transactions ?? null);
@@ -398,6 +559,17 @@ function buildDailyDataset(days) {
     const dt = new Date(cur.date + 'T00:00:00');
     const dow = dt.getDay(); // 0..6
     const month = dt.getMonth(); // 0..11
+    const dayOfYear = getDayOfYear(dt);
+
+    const weather = weatherMap.get(cur.date) || {};
+    const tMin = Number(weather?.t_min ?? 0);
+    const tMax = Number(weather?.t_max ?? 0);
+    const precip = Number(weather?.precipitation ?? 0);
+    const precipProb = Number(weather?.precipitation_probability ?? 0);
+    const weatherCode = Number(weather?.weather_code ?? 0);
+
+    const seasonalSin = Math.sin((2 * Math.PI * dayOfYear) / 365);
+    const seasonalCos = Math.cos((2 * Math.PI * dayOfYear) / 365);
 
     const features = [
       1, // intercept
@@ -407,6 +579,13 @@ function buildDailyDataset(days) {
       prev7,
       ma3,
       ma7,
+      seasonalSin,
+      seasonalCos,
+      tMin,
+      tMax,
+      precip,
+      precipProb,
+      weatherCode,
     ];
     rows.push({ x: features, y: cur.transactions });
   }
@@ -418,6 +597,13 @@ function buildDailyDataset(days) {
   const X = rows.map(r => r.x);
   const y = rows.map(r => r.y);
   return { X, y, featureCount };
+}
+
+function getDayOfYear(dateObj) {
+  const start = new Date(dateObj.getFullYear(), 0, 0);
+  const diff = dateObj - start;
+  const oneDay = 1000 * 60 * 60 * 24;
+  return Math.floor(diff / oneDay);
 }
 
 function transpose(A) { return A[0].map((_, i) => A.map(row => row[i])); }
@@ -512,12 +698,27 @@ function loadModel(name, callback) {
 function trainForecastModel(callback) {
   getDailyAggregates((err, days) => {
     if (err) return callback && callback(err);
-    const { X, y } = buildDailyDataset(days);
-    if (!X.length) return callback && callback(new Error('insufficient-data'));
-    const model = ridgeRegression(X, y, 5.0);
-    if (!model) return callback && callback(new Error('training-failed'));
-    saveModel('expected_customers_daily_v1', model, (saveErr) => {
-      if (callback) callback(saveErr, model);
+    if (!days || !days.length) return callback && callback(new Error('insufficient-data'));
+    const trainingDays = days.slice(-365);
+    if (!trainingDays.length) return callback && callback(new Error('insufficient-data'));
+    const startDate = trainingDays[0].date;
+    const endDate = trainingDays[trainingDays.length - 1].date;
+    ensureWeatherDataRange(startDate, endDate, (weatherErr) => {
+      if (weatherErr) {
+        console.error('weather-range-update-error', weatherErr.message);
+      }
+      getWeatherMap(startDate, endDate, (mapErr, weatherMap) => {
+        if (mapErr) {
+          console.error('weather-map-load-error', mapErr.message);
+        }
+        const { X, y } = buildDailyDataset(trainingDays, !mapErr && weatherMap ? weatherMap : new Map());
+        if (!X.length) return callback && callback(new Error('insufficient-data'));
+        const model = ridgeRegression(X, y, 5.0);
+        if (!model) return callback && callback(new Error('training-failed'));
+        saveModel('expected_customers_daily_v1', model, (saveErr) => {
+          if (callback) callback(saveErr, model);
+        });
+      });
     });
   });
 }
@@ -535,6 +736,11 @@ function predictTomorrowCustomers(callback) {
         return callback(null, Math.round(avg));
       }
       const beta = model.coefficients.beta;
+      const expectedFeatureLength = 1 + 7 + 12 + 4 + 2 + 5;
+      if (beta.length !== expectedFeatureLength) {
+        const avg = days.slice(-28).reduce((a, r) => a + (r.transactions || 0), 0) / Math.max(1, Math.min(28, days.length));
+        return callback(null, Math.round(avg));
+      }
       const toISO = (d) => new Date(d).toISOString().split('T')[0];
       const addDays = (dStr, n) => { const d = new Date(dStr + 'T00:00:00'); d.setDate(d.getDate() + n); return toISO(d); };
       const lastDate = days[days.length - 1].date;
@@ -552,13 +758,51 @@ function predictTomorrowCustomers(callback) {
         return callback(null, Math.round(avg));
       }
       ma3 /= c3; ma7 /= c7;
-      const dt = new Date(tomorrow + 'T00:00:00');
-      const dow = dt.getDay();
-      const month = dt.getMonth();
-      const x = [1, ...oneHot(dow, 7), ...oneHot(month, 12), prev1, prev7, ma3, ma7];
-      const yhat = x.reduce((s, v, i) => s + v * beta[i], 0);
-      const clamped = Math.max(0, Math.round(yhat));
-      callback(null, clamped);
+      ensureWeatherDataRange(lastDate, tomorrow, (weatherErr) => {
+        if (weatherErr) {
+          console.error('weather-range-update-error', weatherErr.message);
+        }
+        getWeatherMap(lastDate, tomorrow, (mapErr, weatherMap) => {
+          if (mapErr) {
+            console.error('weather-map-load-error', mapErr.message);
+          }
+          const dt = new Date(tomorrow + 'T00:00:00');
+          const dow = dt.getDay();
+          const month = dt.getMonth();
+          const dayOfYear = getDayOfYear(dt);
+          const weather = (!mapErr && weatherMap) ? weatherMap.get(tomorrow) || {} : {};
+          const tMin = Number(weather?.t_min ?? 0);
+          const tMax = Number(weather?.t_max ?? 0);
+          const precip = Number(weather?.precipitation ?? 0);
+          const precipProb = Number(weather?.precipitation_probability ?? 0);
+          const weatherCode = Number(weather?.weather_code ?? 0);
+          const seasonalSin = Math.sin((2 * Math.PI * dayOfYear) / 365);
+          const seasonalCos = Math.cos((2 * Math.PI * dayOfYear) / 365);
+          const x = [
+            1,
+            ...oneHot(dow, 7),
+            ...oneHot(month, 12),
+            prev1,
+            prev7,
+            ma3,
+            ma7,
+            seasonalSin,
+            seasonalCos,
+            tMin,
+            tMax,
+            precip,
+            precipProb,
+            weatherCode,
+          ];
+          if (beta.length !== x.length) {
+            const avg = days.slice(-28).reduce((a, r) => a + (r.transactions || 0), 0) / Math.max(1, Math.min(28, days.length));
+            return callback(null, Math.round(avg));
+          }
+          const yhat = x.reduce((s, v, i) => s + v * beta[i], 0);
+          const clamped = Math.max(0, Math.round(yhat));
+          callback(null, clamped);
+        });
+      });
     });
   });
 }
@@ -2416,8 +2660,9 @@ app.post('/api/daily-closings/cleanup', authenticateToken, authorizeRoles('super
 app.post('/api/end-of-day', authenticateToken, (req, res) => {
   const today = new Date().toISOString().split('T')[0];
   db.serialize(() => {
+    // Discard any still-open orders for today by closing them with zero payment.
     db.run(
-      'UPDATE orders SET is_closed = 1, payment_received = COALESCE(payment_received, total_amount), change_given = COALESCE(change_given, 0) WHERE DATE(order_date) = ? AND is_closed = 0',
+      'UPDATE orders SET is_closed = 1, payment_received = 0, change_given = 0 WHERE DATE(order_date) = ? AND is_closed = 0',
       [today]
     );
     db.get(
@@ -2480,6 +2725,8 @@ app.listen(PORT, () => {
   try {
     setTimeout(() => trainForecastModel(() => {}), 5000);
     setInterval(() => trainForecastModel(() => {}), 60 * 60 * 1000);
+    refreshWeatherForecast(() => {});
+    setInterval(() => refreshWeatherForecast(() => {}), 6 * 60 * 60 * 1000);
   } catch (e) {
     // ignore training scheduling errors
   }
