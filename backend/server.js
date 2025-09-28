@@ -1988,35 +1988,57 @@ app.get('/api/analytics/daily', authenticateToken, (req, res) => {
     db.get(totalsSql, [dateParam], (tErr, totals) => {
       if (tErr) return res.status(500).json({ error: tErr.message });
 
-      const byHourMap = new Map((hourRows || []).map(r => [r.hour, r]));
-      const byHour = Array.from({ length: 24 }, (_, h) => {
-        const key = String(h).padStart(2, '0');
-        const r = byHourMap.get(key) || {};
-        return {
-          hour: key,
-          transactions: Number(r.transactions || 0),
-          itemsSold: Number(r.items_sold || 0),
-          revenue: Number(r.revenue || 0),
-        };
-      });
+      const itemsSql = `
+        SELECT
+          COALESCE(oi.product_name, 'Diğer Ürün') AS name,
+          SUM(oi.quantity) AS quantity,
+          SUM(oi.total_price) AS revenue
+        FROM orders o
+        JOIN order_items oi ON oi.order_id = o.id
+        WHERE date(o.order_date) = date(?)
+        GROUP BY name
+        ORDER BY revenue DESC, quantity DESC, name ASC`;
 
-      const tr = Number(totals?.transactions || 0);
-      const items = Number(totals?.items_sold || 0);
-      const rev = Number(totals?.revenue || 0);
-      const avgTicket = tr > 0 ? Number((rev / tr).toFixed(2)) : 0;
-      const avgBasketSize = tr > 0 ? Number((items / tr).toFixed(2)) : 0;
+      db.all(itemsSql, [dateParam], (itemsErr, itemRows) => {
+        if (itemsErr) return res.status(500).json({ error: itemsErr.message });
 
-      res.json({
-        date: dateParam,
-        byHour,
-        totals: {
-          transactions: tr,
-          itemsSold: items,
-          revenue: rev,
-          avgTicket,
-          avgBasketSize,
-          expectedPeople: tr, // approximate expected customers as transactions
-        },
+        const byHourMap = new Map((hourRows || []).map(r => [r.hour, r]));
+        const byHour = Array.from({ length: 24 }, (_, h) => {
+          const key = String(h).padStart(2, '0');
+          const r = byHourMap.get(key) || {};
+          return {
+            hour: key,
+            transactions: Number(r.transactions || 0),
+            itemsSold: Number(r.items_sold || 0),
+            revenue: Number(r.revenue || 0),
+          };
+        });
+
+        const tr = Number(totals?.transactions || 0);
+        const items = Number(totals?.items_sold || 0);
+        const rev = Number(totals?.revenue || 0);
+        const avgTicket = tr > 0 ? Number((rev / tr).toFixed(2)) : 0;
+        const avgBasketSize = tr > 0 ? Number((items / tr).toFixed(2)) : 0;
+
+        const itemsList = (itemRows || []).map((row) => ({
+          name: row?.name || 'Diğer Ürün',
+          quantity: Number(row?.quantity || 0),
+          revenue: Number(row?.revenue || 0),
+        }));
+
+        res.json({
+          date: dateParam,
+          byHour,
+          totals: {
+            transactions: tr,
+            itemsSold: items,
+            revenue: rev,
+            avgTicket,
+            avgBasketSize,
+            expectedPeople: tr, // approximate expected customers as transactions
+          },
+          items: itemsList,
+        });
       });
     });
   });

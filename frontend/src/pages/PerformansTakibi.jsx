@@ -221,7 +221,7 @@ export default function PerformansTakibi() {
   const todayStr = new Date().toISOString().split('T')[0];
   const [date, setDate] = useState(todayStr);
   const [weekEnd, setWeekEnd] = useState(todayStr); // Haftalık rapor için bitiş günü
-  const [daily, setDaily] = useState({ byHour: [], totals: {} });
+  const [daily, setDaily] = useState({ byHour: [], totals: {}, items: [] });
   const [weekly, setWeekly] = useState({ byDay: [], revenueTrend: [], revenueDistribution: [], avgBasketSize: 0, trendComparison: {} });
   const [forecast, setForecast] = useState({ hourlyHeatmap: Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => 0)), expectedCustomersTomorrow: 0, staffingRecommendation: '' });
   const [loading, setLoading] = useState(false);
@@ -252,7 +252,7 @@ export default function PerformansTakibi() {
       const d = await dRes.json();
       const w = await wRes.json();
       const f = await fRes.json();
-      setDaily({ byHour: d.byHour || [], totals: d.totals || {} });
+      setDaily({ byHour: d.byHour || [], totals: d.totals || {}, items: d.items || [] });
       setWeekly({
         byDay: w.byDay || [],
         revenueTrend: w.revenueTrend || [],
@@ -277,6 +277,21 @@ export default function PerformansTakibi() {
     loadData(date, weekEnd);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const dailyItems = useMemo(() => {
+    const source = Array.isArray(daily.items) ? daily.items : [];
+    return source
+      .map((item) => ({
+        name: item?.name || 'Diğer Ürün',
+        quantity: Number(item?.quantity || 0),
+        revenue: Number(item?.revenue || 0),
+      }))
+      .sort((a, b) => {
+        if (b.revenue !== a.revenue) return b.revenue - a.revenue;
+        if (b.quantity !== a.quantity) return b.quantity - a.quantity;
+        return a.name.localeCompare(b.name, 'tr');
+      });
+  }, [daily.items]);
 
   const hourLabels = useMemo(() => daily.byHour.map((h) => h.hour), [daily.byHour]);
   const itemsSeries = useMemo(() => daily.byHour.map((h) => h.itemsSold), [daily.byHour]);
@@ -350,6 +365,36 @@ export default function PerformansTakibi() {
             <div className="text-sm font-medium text-gray-700 mb-2">Saat Bazlı İşlem Sayısı</div>
             <SimpleBarChart labels={hourLabels} series={txSeries} colorClass="bg-blue-600" height={240} yTitle="İşlem" />
           </div>
+        </div>
+
+        <div className="mt-6">
+          <div className="text-sm font-medium text-gray-700 mb-2">Günlük Satılan Ürünler</div>
+          {dailyItems.length ? (
+            <div className="overflow-x-auto rounded border border-gray-200 bg-white shadow-sm">
+              <table className="min-w-full divide-y divide-gray-200 text-sm">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th scope="col" className="px-4 py-2 text-left font-semibold text-gray-700">Ürün</th>
+                    <th scope="col" className="px-4 py-2 text-right font-semibold text-gray-700">Adet</th>
+                    <th scope="col" className="px-4 py-2 text-right font-semibold text-gray-700">Ciro</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {dailyItems.map((item, idx) => (
+                    <tr key={`${item.name}-${idx}`}>
+                      <td className="px-4 py-2 text-gray-800">{item.name}</td>
+                      <td className="px-4 py-2 text-right text-gray-600">{item.quantity}</td>
+                      <td className="px-4 py-2 text-right text-gray-600">{formatCurrency(item.revenue)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="rounded border border-dashed border-gray-300 bg-white px-4 py-6 text-center text-sm text-gray-500">
+              Seçilen gün için ürün satışı bulunamadı.
+            </div>
+          )}
         </div>
       </Section>
 
