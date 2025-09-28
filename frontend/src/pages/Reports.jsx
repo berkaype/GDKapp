@@ -38,11 +38,11 @@ function BarChart({ data }) {
   if (!Array.isArray(data) || data.length === 0) {
     return null;
   }
-  const maxValue =
-    data.reduce((max, item) => {
-      const value = Math.abs(Number(item?.value) || 0);
-      return value > max ? value : max;
-    }, 0) || 1;
+  const maxValue = data.reduce((max, item) => {
+    const value = Number(item?.value) || 0;
+    return value > max ? value : max;
+  }, 0);
+  const effectiveMax = maxValue > 0 ? maxValue : 1;
 
   // Rebuilt chart: fixed pixel calculus for reliability
   const plotHeight = 420; // vertical space for bars only
@@ -57,8 +57,9 @@ function BarChart({ data }) {
         <div className="relative z-10 h-full flex items-end justify-around gap-6">
           {data.map((item) => {
             const value = Number(item?.value) || 0;
-            const magnitude = Math.abs(value);
-            const px = Math.max(Math.round((magnitude / maxValue) * (plotHeight - 8)), magnitude > 0 ? minBarPx : 0);
+            const isPositive = value > 0;
+            const magnitude = isPositive ? value : 0;
+            const px = isPositive ? Math.max(Math.round((magnitude / effectiveMax) * (plotHeight - 8)), minBarPx) : 0;
             const isNegative = value < 0;
             const barClass = item?.key === 'net' ? 'bg-green-600' : (isNegative ? 'bg-rose-500' : (item.color || 'bg-blue-500'));
 

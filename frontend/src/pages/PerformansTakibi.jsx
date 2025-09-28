@@ -71,41 +71,89 @@ function SimpleBarChart({ labels = [], series = [], colorClass = 'bg-blue-600', 
 }
 
 function SimpleLineChart({ points = [], height = 220, color = '#2563eb', yTitle, formatTick = (n) => n, ticks = 5 }) {
-  const maxY = Math.max(1, ...points.map((p) => p.y));
-  const minY = Math.min(0, ...points.map((p) => p.y));
-  const pad = 8;
-  const w = Math.max(60, points.length * 40);
-  const h = height;
-  const toX = (i) => (pad + (i * (w - 2 * pad)) / Math.max(1, points.length - 1));
-  const toY = (y) => (h - pad - ((y - minY) / Math.max(1e-6, maxY - minY)) * (h - 2 * pad));
-  const d = points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${toX(i)} ${toY(p.y)}`).join(' ');
+  if (!points.length) {
+    return null;
+  }
 
-  const tickVals = Array.from({ length: ticks }, (_, i) => minY + (i / (ticks - 1)) * (maxY - minY));
+  const safePoints = points.map((p, index) => ({
+    ...p,
+    y: Number(p?.y) || 0,
+    label: p?.label ?? `#${index + 1}`
+  }));
+
+  const gridId = useMemo(() => `line-grid-${Math.random().toString(36).slice(2, 8)}`, []);
+
+  const maxY = Math.max(0, ...safePoints.map((p) => p.y));
+  const minY = Math.min(0, ...safePoints.map((p) => p.y));
+
+  const padLeft = 12;
+  const padRight = 12;
+  const padTop = 12;
+  const padBottom = 32;
+  const baseStep = 80;
+  const baseWidth = 640;
+  const h = height;
+  const span = safePoints.length > 1 ? (safePoints.length - 1) * baseStep : baseStep;
+  const w = Math.max(baseWidth, padLeft + padRight + span);
+  const range = Math.max(1e-6, maxY - minY);
+
+  const toX = (idx) => {
+    if (safePoints.length === 1) {
+      return w / 2;
+    }
+    return padLeft + (idx * (w - padLeft - padRight)) / (safePoints.length - 1);
+  };
+
+  const toY = (value) => {
+    const scaled = (value - minY) / range;
+    return h - padBottom - scaled * (h - padTop - padBottom);
+  };
+
+  const pathD = safePoints.map((point, idx) => `${idx === 0 ? 'M' : 'L'} ${toX(idx)} ${toY(point.y)}`).join(' ');
+
+  const tickVals = ticks > 1
+    ? Array.from({ length: ticks }, (_, i) => minY + ((maxY - minY) * i) / (ticks - 1))
+    : [minY];
 
   return (
     <div className="grid" style={{ gridTemplateColumns: '56px 1fr', gap: 8 }}>
-      {/* Y Axis */}
       <div className="relative" style={{ height: h }}>
         <div className="absolute left-0 top-0 text-[10px] text-gray-500">{yTitle}</div>
-        {tickVals.map((v, i) => (
-          <div key={i} className="absolute left-0 -translate-y-1/2 text-[10px] text-gray-600" style={{ bottom: `${(v - minY) / Math.max(1e-6, maxY - minY) * (h - 2 * pad)}px` }}>
-            {formatTick(Math.round(v))}
+        {tickVals.map((tick, idx) => (
+          <div
+            key={idx}
+            className="absolute left-0 -translate-y-1/2 text-[10px] text-gray-600"
+            style={{ bottom: `${((tick - minY) / range) * (h - padTop - padBottom)}px` }}
+          >
+            {formatTick(Math.round(tick))}
           </div>
         ))}
       </div>
-      {/* Plot */}
-      <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} className="rounded border border-gray-200 bg-white">
-        <rect x="0" y="0" width={w} height={h} fill="url(#grid)" />
-        <defs>
-          <pattern id="grid" width="1" height="48" patternUnits="userSpaceOnUse">
-            <rect width="100%" height="1" fill="rgba(0,0,0,0.06)" />
-          </pattern>
-        </defs>
-        <path d={d} fill="none" stroke={color} strokeWidth="2" />
-        {points.map((p, i) => (
-          <circle key={i} cx={toX(i)} cy={toY(p.y)} r="3" fill={color} />
-        ))}
-      </svg>
+      <div className="relative" style={{ height: h }}>
+        <svg width="100%" height={h} viewBox={`0 0 ${w} ${h}`} className="rounded border border-gray-200 bg-white">
+          <defs>
+            <pattern id={gridId} width="1" height="48" patternUnits="userSpaceOnUse">
+              <rect width="100%" height="1" fill="rgba(0,0,0,0.06)" />
+            </pattern>
+          </defs>
+          <rect x={0} y={0} width={w} height={h} fill={`url(#${gridId})`} />
+          <path d={pathD} fill="none" stroke={color} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
+          {safePoints.map((point, idx) => (
+            <g key={idx}>
+              <circle cx={toX(idx)} cy={toY(point.y)} r={3.5} fill={color} />
+              <text
+                x={toX(idx)}
+                y={h - padBottom + 18}
+                textAnchor="middle"
+                fontSize="10"
+                fill="#4b5563"
+              >
+                {point.label}
+              </text>
+            </g>
+          ))}
+        </svg>
+      </div>
     </div>
   );
 }
@@ -236,20 +284,24 @@ export default function PerformansTakibi() {
 
   const busyDayLabels = useMemo(() => weekly.byDay.map((d) => {
     const dt = new Date(d.date + 'T00:00:00');
-    const lbl = d.date.slice(5);
+    const lbl = d.date ? `${d.date.slice(8, 10)}.${d.date.slice(5, 7)}` : '';
     const day = dayNames[dt.getDay()];
     return `${lbl}\n${day}`;
   }), [weekly.byDay]);
   const busyDayTx = useMemo(() => weekly.byDay.map((d) => d.transactions), [weekly.byDay]);
 
-  const revenueLinePts = useMemo(() => weekly.revenueTrend.map((d, i) => ({ x: i, y: d.revenue })), [weekly.revenueTrend]);
+  const revenueLinePts = useMemo(() => weekly.revenueTrend.map((d, i) => {
+    const rawDate = d?.date || '';
+    const label = rawDate && rawDate.length >= 10 ? `${rawDate.slice(8, 10)}.${rawDate.slice(5, 7)}` : `#${i + 1}`;
+    return { x: i, y: Number(d?.revenue) || 0, label };
+  }), [weekly.revenueTrend]);
 
   const pieSlices = useMemo(() => {
     const palette = ['#2563eb', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#14b8a6', '#f97316'];
     return (weekly.revenueDistribution || []).map((it, idx) => {
       const dt = new Date(it.date + 'T00:00:00');
       const day = dayNames[dt.getDay()];
-      return { label: `${it.date.slice(5)} - ${day}`, value: Number(it.pct || 0), color: palette[idx % palette.length] };
+      return { label: `${it.date ? `${it.date.slice(8, 10)}.${it.date.slice(5, 7)}` : ''} - ${day}`, value: Number(it.pct || 0), color: palette[idx % palette.length] };
     });
   }, [weekly.revenueDistribution]);
 

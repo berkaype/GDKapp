@@ -1,9 +1,52 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Settings, ShoppingCart } from 'lucide-react';
+import { Settings, ShoppingCart, Palette, ChevronUp, ChevronDown } from 'lucide-react';
 import { formatCurrency } from '../utils/format.js';
 import { getApiBase, authHeaders } from '../utils/api.js';
 
 const API_BASE = getApiBase();
+
+const DEFAULT_PRODUCT_BACKGROUND = '#DBEAFE';
+const DEFAULT_PRODUCT_TEXT = '#2563EB';
+
+const normalizeHexColor = (value) => {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const hex = value.trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(hex)) {
+    return `#${hex.slice(1).toUpperCase()}`;
+  }
+  return null;
+};
+
+const sanitizeSingleProductStyle = (style) => {
+  if (!style || typeof style !== 'object') {
+    return null;
+  }
+  const background = normalizeHexColor(style.background);
+  const text = normalizeHexColor(style.text);
+  const entry = {};
+  if (background && background !== DEFAULT_PRODUCT_BACKGROUND) {
+    entry.background = background;
+  }
+  if (text && text !== DEFAULT_PRODUCT_TEXT) {
+    entry.text = text;
+  }
+  return Object.keys(entry).length ? entry : null;
+};
+
+const sanitizeProductStyles = (value) => {
+  if (!value || typeof value !== 'object') {
+    return {};
+  }
+  return Object.entries(value).reduce((acc, [key, style]) => {
+    const sanitized = sanitizeSingleProductStyle(style);
+    if (sanitized) {
+      acc[key] = sanitized;
+    }
+    return acc;
+  }, {});
+};
 
 export default function POS({ onAdminClick, onOrderClosed }) {
   const [activeOrders, setActiveOrders] = useState([]);
@@ -16,9 +59,16 @@ export default function POS({ onAdminClick, onOrderClosed }) {
   const [positionsLocked, setPositionsLocked] = useState(true);
   const [productOrder, setProductOrder] = useState({});
   const [categoryOrder, setCategoryOrder] = useState([]);
+  const [productStyles, setProductStyles] = useState({});
+  const [activeColorEditor, setActiveColorEditor] = useState(null);
+  const [orderNote, setOrderNote] = useState('');
+  const [noteStatus, setNoteStatus] = useState('idle');
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedItems, setSelectedItems] = useState({});
   const paymentInputRef = useRef(null);
+  const noteSaveTimer = useRef(null);
+  const [tables, setTables] = useState([]);
+  const [tableMap, setTableMap] = useState(() => new Map());
 
   const getProductKey = (product) => {
     const category = product?.category || 'Diğer';
@@ -34,11 +84,94 @@ export default function POS({ onAdminClick, onOrderClosed }) {
     }
     return `${category}::${identifier}`;
   };
-  const drinkCategoryTokens = ['icecek', 'içecek', 'icecekler', 'içecekler'];
+  // İçecek kategorilerini algılamak için Türkçe karakterleri normalize et
+  const drinkCategoryTokens = ['icecek', 'icecekler', 'içecek', 'içecekler'];
+  const normalizeTr = (s) => {
+    if (!s) return '';
+    const map = { 'ç':'c','Ç':'c','ğ':'g','Ğ':'g','ı':'i','İ':'i','ö':'o','Ö':'o','ş':'s','Ş':'s','ü':'u','Ü':'u' };
+    return String(s).split('').map(ch => map[ch] ?? ch).join('').toLowerCase('tr-TR');
+  };
+
+  const updateProductStyleEntry = (productKey, updater) => {
+    setProductStyles((prev) => {
+      const base = prev[productKey] || {};
+      const draft = { ...base };
+      const result = updater(draft) ?? draft;
+      const sanitized = sanitizeSingleProductStyle(result);
+      if (!sanitized) {
+        if (!prev[productKey]) {
+          return prev;
+        }
+        const { [productKey]: _removed, ...rest } = prev;
+        return rest;
+      }
+      const existing = prev[productKey] || {};
+      if (
+        existing.background === sanitized.background &&
+        existing.text === sanitized.text
+      ) {
+        return prev;
+      }
+      return { ...prev, [productKey]: sanitized };
+    });
+  };
+
+  const handleBackgroundColorChange = (productKey, value) => {
+    const normalized = normalizeHexColor(value) ?? DEFAULT_PRODUCT_BACKGROUND;
+    updateProductStyleEntry(productKey, (draft) => {
+      draft.background = normalized;
+      return draft;
+    });
+  };
+
+  const handleTextColorChange = (productKey, value) => {
+    const normalized = normalizeHexColor(value) ?? DEFAULT_PRODUCT_TEXT;
+    updateProductStyleEntry(productKey, (draft) => {
+      draft.text = normalized;
+      return draft;
+    });
+  };
+
+  const resetProductStyle = (productKey) => {
+    setProductStyles((prev) => {
+      if (!prev[productKey]) {
+        return prev;
+      }
+      const { [productKey]: _removed, ...rest } = prev;
+      return rest;
+    });
+  };
+
+  useEffect(() => {
+    return () => {
+      if (noteSaveTimer.current) {
+        clearTimeout(noteSaveTimer.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     fetchActiveOrders();
     fetchProducts();
+  }, []);
+
+  // Load table names
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/table-names`);
+        if (res.ok) {
+          const data = await res.json();
+          const list = Array.isArray(data?.tables) ? data.tables : [];
+          setTables(list);
+          const map = new Map();
+          list.forEach((t) => map.set(Number(t.id), t.name || `Masa ${t.id}`));
+          setTableMap(map);
+        }
+      } catch (e) {
+        // ignore
+      }
+    })();
   }, []);
 
   // Load POS layout from backend
@@ -49,8 +182,9 @@ export default function POS({ onAdminClick, onOrderClosed }) {
         if (res.ok) {
           const data = await res.json();
           if (typeof data.positionsLocked === 'boolean') setPositionsLocked(data.positionsLocked);
-          if (data.productOrder && typeof data.productOrder === 'object') setProductOrder(data.productOrder);
-          if (Array.isArray(data.categoryOrder)) setCategoryOrder(data.categoryOrder);
+          setProductOrder(data.productOrder && typeof data.productOrder === 'object' ? data.productOrder : {});
+          setCategoryOrder(Array.isArray(data.categoryOrder) ? data.categoryOrder : []);
+          setProductStyles(sanitizeProductStyles(data.productStyles));
         }
       } catch (e) {
         console.error(e);
@@ -65,10 +199,16 @@ export default function POS({ onAdminClick, onOrderClosed }) {
       if (layoutSaveTimer.current) clearTimeout(layoutSaveTimer.current);
       layoutSaveTimer.current = setTimeout(async () => {
         try {
+          const payload = {
+            positionsLocked,
+            productOrder,
+            categoryOrder,
+            productStyles: sanitizeProductStyles(productStyles),
+          };
           await fetch(`${API_BASE}/pos-layout`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json', ...authHeaders() },
-            body: JSON.stringify({ positionsLocked, productOrder, categoryOrder }),
+            body: JSON.stringify(payload),
           });
         } catch (e) {
           console.error(e);
@@ -80,7 +220,7 @@ export default function POS({ onAdminClick, onOrderClosed }) {
     return () => {
       if (layoutSaveTimer.current) clearTimeout(layoutSaveTimer.current);
     };
-  }, [positionsLocked, productOrder, categoryOrder]);
+  }, [positionsLocked, productOrder, categoryOrder, productStyles]);
 
   useEffect(() => {
     if (!selectionMode) {
@@ -120,6 +260,75 @@ export default function POS({ onAdminClick, onOrderClosed }) {
     setShowPayment(false);
     setPaymentAmount('');
   }, [currentOrder?.id]);
+
+  useEffect(() => {
+    if (!currentOrder) {
+      setOrderNote('');
+      setNoteStatus('idle');
+      if (noteSaveTimer.current) {
+        clearTimeout(noteSaveTimer.current);
+        noteSaveTimer.current = null;
+      }
+      return;
+    }
+    setOrderNote(currentOrder.description || '');
+    setNoteStatus('idle');
+  }, [currentOrder?.id]);
+
+  useEffect(() => {
+    if (!currentOrder) {
+      return;
+    }
+    const orderId = currentOrder.id;
+    const rawNote = orderNote ?? '';
+    const normalizedNote = rawNote.replace(/\r/g, '').replace(/\n/g, '');
+    if ((currentOrder.description || '') === normalizedNote) {
+      if (rawNote !== normalizedNote) {
+        setOrderNote(normalizedNote);
+      }
+      return;
+    }
+    if (noteSaveTimer.current) {
+      clearTimeout(noteSaveTimer.current);
+    }
+    setNoteStatus('saving');
+    noteSaveTimer.current = setTimeout(async () => {
+      try {
+        const response = await fetch(`${API_BASE}/orders/${orderId}/note`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ note: normalizedNote }),
+        });
+        if (!response.ok) {
+          throw new Error('note-save-failed');
+        }
+        setCurrentOrder((prev) => (prev && prev.id === orderId ? { ...prev, description: normalizedNote } : prev));
+        if (rawNote !== normalizedNote) {
+          setOrderNote(normalizedNote);
+        }
+        setNoteStatus('saved');
+      } catch (error) {
+        console.error(error);
+        setNoteStatus('error');
+      } finally {
+        noteSaveTimer.current = null;
+      }
+    }, 600);
+    return () => {
+      if (noteSaveTimer.current) {
+        clearTimeout(noteSaveTimer.current);
+        noteSaveTimer.current = null;
+      }
+    };
+  }, [orderNote, currentOrder?.id]);
+
+  useEffect(() => {
+    if (noteStatus !== 'saved') {
+      return;
+    }
+    const timeout = setTimeout(() => setNoteStatus('idle'), 1600);
+    return () => clearTimeout(timeout);
+  }, [noteStatus]);
 
   const groupedProducts = useMemo(() => {
     if (!products.length) {
@@ -213,6 +422,49 @@ export default function POS({ onAdminClick, onOrderClosed }) {
       return changed ? next : prev;
     });
   }, [groupedProducts]);
+
+  useEffect(() => {
+    if (!Object.keys(groupedProducts).length) {
+      return;
+    }
+    const validKeys = new Set();
+    Object.values(groupedProducts).forEach((list) => {
+      list.forEach((item) => {
+        validKeys.add(getProductKey(item));
+      });
+    });
+    setProductStyles((prev) => {
+      let changed = false;
+      const next = {};
+      Object.entries(prev).forEach(([key, style]) => {
+        if (validKeys.has(key)) {
+          next[key] = style;
+        } else {
+          changed = true;
+        }
+      });
+      return changed ? next : prev;
+    });
+  }, [groupedProducts]);
+
+  useEffect(() => {
+    if (positionsLocked) {
+      setActiveColorEditor(null);
+    }
+  }, [positionsLocked]);
+
+  useEffect(() => {
+    if (!activeColorEditor) {
+      return;
+    }
+    const exists = Object.values(groupedProducts).some((list) =>
+      list.some((item) => getProductKey(item) === activeColorEditor)
+    );
+    if (!exists) {
+      setActiveColorEditor(null);
+    }
+  }, [activeColorEditor, groupedProducts]);
+
   const fetchActiveOrders = async () => {
     try {
       const r = await fetch(`${API_BASE}/orders?status=open`);
@@ -231,6 +483,7 @@ export default function POS({ onAdminClick, onOrderClosed }) {
         if (!data.length) {
           setCategoryOrder([]);
           setProductOrder({});
+          setProductStyles({});
         }
       }
     } catch (e) {
@@ -613,7 +866,7 @@ export default function POS({ onAdminClick, onOrderClosed }) {
 
   const isDrinkCategory = (category) => {
     if (!category) return false;
-    const normalized = category.toLocaleLowerCase('tr-TR');
+    const normalized = normalizeTr(category);
     return drinkCategoryTokens.some((token) => normalized.includes(token));
   };
 
@@ -763,7 +1016,7 @@ export default function POS({ onAdminClick, onOrderClosed }) {
                     handleMoveCategory(category, -1);
                   }}
                 >
-                  ▲
+                  <ChevronUp className="h-3 w-3" />
                 </button>
                 <button
                   type="button"
@@ -774,7 +1027,7 @@ export default function POS({ onAdminClick, onOrderClosed }) {
                     handleMoveCategory(category, 1);
                   }}
                 >
-                  ▼
+                  <ChevronDown className="h-3 w-3" />
                 </button>
               </div>
             )}
@@ -786,38 +1039,117 @@ export default function POS({ onAdminClick, onOrderClosed }) {
         <div className={gridClasses}>
           {orderedList.map((product, index) => {
             const productKey = orderedKeys[index];
+            const styleConfig = productStyles[productKey] || {};
+            const backgroundColor = styleConfig.background || DEFAULT_PRODUCT_BACKGROUND;
+            const accentColor = styleConfig.text || DEFAULT_PRODUCT_TEXT;
             return (
               <div key={productKey} className="relative">
                 <button
                   onClick={() => addProductToOrder(product)}
-                  className="w-full p-4 bg-blue-100 hover:bg-blue-200 rounded-lg text-center h-full flex flex-col justify-between"
+                  className="w-full p-4 rounded-lg text-center h-full flex flex-col justify-between transition hover:shadow-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-400"
+                  style={{ backgroundColor }}
                 >
-                  <div className="font-medium text-sm mb-1">{product.product_name}</div>
-                  <div className="text-blue-600 font-semibold">{formatCurrency(product.price)}</div>
+                  <div className="font-medium text-sm mb-1 text-gray-900 break-words">
+                    {product.product_name}
+                  </div>
+                  <div className="font-semibold" style={{ color: accentColor }}>
+                    {formatCurrency(product.price)}
+                  </div>
                 </button>
                 {!positionsLocked && (
-                  <div className="absolute top-2 right-2 flex flex-col rounded bg-white/90 shadow">
-                    <button
-                      type="button"
-                      className="text-xs px-1 py-0.5 hover:text-blue-600"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        handleMoveProduct(category, orderedKeys, productKey, -1);
-                      }}
-                    >
-                      ▲
-                    </button>
-                    <button
-                      type="button"
-                      className="text-xs px-1 py-0.5 hover:text-blue-600"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        handleMoveProduct(category, orderedKeys, productKey, 1);
-                      }}
-                    >
-                      ▼
-                    </button>
-                  </div>
+                  <>
+                    <div className="absolute top-2 right-2 flex flex-col rounded bg-white/90 shadow">
+                      <button
+                        type="button"
+                        className="text-xs px-1 py-0.5 hover:text-blue-600"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          handleMoveProduct(category, orderedKeys, productKey, -1);
+                        }}
+                      >
+                        <ChevronUp className="h-3 w-3" />
+                      </button>
+                      <button
+                        type="button"
+                        className="text-xs px-1 py-0.5 hover:text-blue-600"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          handleMoveProduct(category, orderedKeys, productKey, 1);
+                        }}
+                      >
+                        <ChevronDown className="h-3 w-3" />
+                      </button>
+                    </div>
+                    <div className="absolute top-2 left-2 z-20">
+                      <button
+                        type="button"
+                        className="w-7 h-7 rounded-full bg-white/90 shadow flex items-center justify-center text-blue-600 hover:bg-blue-100"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setActiveColorEditor((prev) => (prev === productKey ? null : productKey));
+                        }}
+                        aria-label="Ürün rengi"
+                      >
+                        <Palette className="w-4 h-4" />
+                      </button>
+                    </div>
+                    {activeColorEditor === productKey && (
+                      <div
+                        className="absolute top-12 left-2 z-30 w-44 rounded-lg bg-white shadow-lg p-3 space-y-3"
+                        onClick={(event) => event.stopPropagation()}
+                        onMouseDown={(event) => event.stopPropagation()}
+                      >
+                        <div>
+                          <label className="block text-xs font-semibold text-gray-600 mb-1">
+                            Arkaplan
+                          </label>
+                          <input
+                            type="color"
+                            className="w-full h-8 cursor-pointer border border-gray-200 rounded"
+                            value={styleConfig.background || DEFAULT_PRODUCT_BACKGROUND}
+                            onChange={(event) => {
+                              event.stopPropagation();
+                              handleBackgroundColorChange(productKey, event.target.value);
+                            }}
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-semibold text-gray-600 mb-1">Vurgu</label>
+                          <input
+                            type="color"
+                            className="w-full h-8 cursor-pointer border border-gray-200 rounded"
+                            value={styleConfig.text || DEFAULT_PRODUCT_TEXT}
+                            onChange={(event) => {
+                              event.stopPropagation();
+                              handleTextColorChange(productKey, event.target.value);
+                            }}
+                          />
+                        </div>
+                        <div className="flex gap-2">
+                          <button
+                            type="button"
+                            className="flex-1 text-xs px-2 py-1 rounded border border-gray-200 text-gray-600 hover:bg-gray-100"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              resetProductStyle(productKey);
+                            }}
+                          >
+                            Varsayılan
+                          </button>
+                          <button
+                            type="button"
+                            className="flex-1 text-xs px-2 py-1 rounded border border-gray-200 text-gray-600 hover:bg-gray-100"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              setActiveColorEditor(null);
+                            }}
+                          >
+                            Kapat
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             );
@@ -900,7 +1232,7 @@ export default function POS({ onAdminClick, onOrderClosed }) {
   const paymentConfirmLabel = selectionMode && hasSelection ? 'Tahsil Et' : 'Kapat';
   const paymentValue = paymentAmount ? parseFloat(paymentAmount) : 0;
   const change = paymentAmount ? paymentValue - paymentTarget : 0;
-  const tables = [1, 2, 3, 4, 5, 6, 7, 8];
+  const tableList = useMemo(() => (tables && tables.length ? tables : Array.from({ length: 8 }, (_, i) => ({ id: i + 1, name: `Masa ${i + 1}` }))), [tables]);
 
   return (
     <div className="flex h-screen bg-gray-100">
@@ -913,7 +1245,8 @@ export default function POS({ onAdminClick, onOrderClosed }) {
             </button>
           </div>
           <div className="grid grid-cols-2 gap-2 mb-4">
-            {tables.map((n) => {
+            {tableList.map((t) => {
+              const n = Number(t.id);
               const tableOrder = activeOrders.find(
                 (o) => o.order_type === 'table' && o.table_number === n
               );
@@ -927,7 +1260,7 @@ export default function POS({ onAdminClick, onOrderClosed }) {
                       : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
                   }`}
                 >
-                  Masa {n}
+                  {t.name || `Masa ${n}`}
                   {tableOrder && (
                     <div className="text-xs mt-1">{formatCurrency(tableOrder.total_amount)}</div>
                   )}
@@ -946,6 +1279,7 @@ export default function POS({ onAdminClick, onOrderClosed }) {
           <h3 className="font-semibold mb-2">Paket Siparişler</h3>
           {activeOrders
             .filter((o) => o.order_type === 'takeaway')
+            .sort((a, b) => Number(a.takeaway_seq || 0) - Number(b.takeaway_seq || 0))
             .map((o) => (
               <button
                 key={o.id}
@@ -970,7 +1304,7 @@ export default function POS({ onAdminClick, onOrderClosed }) {
             <div className="flex justify-between items-center mb-6">
               <h2 className="text-2xl font-bold">
                 {currentOrder.order_type === 'table'
-                  ? `Masa ${currentOrder.table_number}`
+                  ? (tableMap.get(Number(currentOrder.table_number)) || `Masa ${currentOrder.table_number}`)
                   : `Paket #${currentOrder.takeaway_seq ?? currentOrder.id}`}
               </h2>
               <div className="flex gap-2 flex-wrap">
@@ -1178,6 +1512,21 @@ export default function POS({ onAdminClick, onOrderClosed }) {
               </div>
             )}
           </div>
+          <div className="px-4 pb-6 pt-2 space-y-2 mt-6">
+            <label className="block text-sm font-medium text-gray-700" htmlFor="order-note">Sipariş Notu</label>
+            <textarea
+              id="order-note"
+              className="w-full min-h-[96px] resize-y rounded-md border border-gray-300 px-3 py-2 text-sm focus:border-blue-500 focus:outline-none focus:ring-1 focus:ring-blue-500"
+              placeholder="Servis veya paket notu ekleyin..."
+              value={orderNote}
+              onChange={(event) => setOrderNote(event.target.value)}
+            />
+            <div className="text-xs text-gray-500 h-4">
+              {noteStatus === 'saving' && 'Kaydediliyor...'}
+              {noteStatus === 'saved' && 'Kaydedildi'}
+              {noteStatus === 'error' && 'Kaydedilemedi. Lütfen tekrar deneyin.'}
+            </div>
+          </div>
         </div>
       )}
 
@@ -1221,3 +1570,5 @@ export default function POS({ onAdminClick, onOrderClosed }) {
     </div>
   );
 }
+
+

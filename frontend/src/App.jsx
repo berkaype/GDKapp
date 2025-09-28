@@ -12,6 +12,7 @@ import PerformansTakibi from './pages/PerformansTakibi.jsx';
 import CiroGecmisi from './pages/CiroGecmisi.jsx';
 import VeriYazdirma from './pages/VeriYazdirma.jsx';
 import MaliyetHesaplama from './pages/MaliyetHesaplama.jsx';
+const TableNames = React.lazy(() => import('./pages/TableNames.jsx'));
 import { formatCurrency } from './utils/format.js';
 import { getApiBase } from './utils/api.js';
 
@@ -88,10 +89,10 @@ export default function App() {
           setCurrentPage('pos');
         }
       } else {
-        alert('Geçersiz kullanici adi veya sifre');
+        alert('Geçersiz Kullanıcı adı veya Şifre');
       }
     } catch (error) {
-      alert('Giris yaparken bir hata olustu');
+      alert('Giriş yaparken bir hata oluştu');
     }
   };
 
@@ -102,6 +103,27 @@ export default function App() {
     setUser(null);
     setCurrentPage('pos');
   };
+
+  const handleEndOfDay = async () => {
+    if (!window.confirm('Günsonu almak istediğinizden emin misiniz?')) {
+      return;
+    }
+    try {
+      const response = await fetch(`${API_BASE}/end-of-day`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
+      });
+      if (response.ok) {
+        window.dispatchEvent(new CustomEvent('refresh-daily-revenue'));
+        alert('Günsonu alındı');
+      } else {
+        alert('Günsonu alınmadı');
+      }
+    } catch (error) {
+      alert('Günsonu alınmadı');
+    }
+  };
+
 
   const requireAuth = (page) => {
     if (!isAuthenticated) {
@@ -128,7 +150,7 @@ export default function App() {
         <div className="bg-white rounded-lg p-8 w-96">
           <div className="text-center mb-6">
             <Lock className="icon-lg mx-auto text-blue-600 mb-4" />
-            <h2 className="text-2xl font-bold">Admin Girisi</h2>
+            <h2 className="text-2xl font-bold">Admin Girişi</h2>
           </div>
           <form onSubmit={handleLogin} className="space-y-4">
             <input
@@ -136,21 +158,21 @@ export default function App() {
               value={loginData.username}
               onChange={(event) => setLoginData({ ...loginData, username: event.target.value })}
               className="w-full px-3 py-2 border rounded"
-              placeholder="Kullanici adi"
+              placeholder="Kullanıcı adı"
             />
             <input
               type="password"
               value={loginData.password}
               onChange={(event) => setLoginData({ ...loginData, password: event.target.value })}
               className="w-full px-3 py-2 border rounded"
-              placeholder="Sifre"
+              placeholder="Şifre"
             />
             <div className="flex gap-3">
               <button type="button" onClick={() => setShowLogin(false)} className="flex-1 py-2 bg-gray-500 text-white rounded">
-                Iptal
+                İptal
               </button>
               <button type="submit" className="flex-1 py-2 bg-blue-600 text-white rounded">
-                Giris
+                Giriş
               </button>
             </div>
           </form>
@@ -186,29 +208,14 @@ export default function App() {
                 <div className="text-lg font-bold text-green-600">{formatCurrency(dailyRevenue)}</div>
               </div>
               <button
-                onClick={async () => {
-                  try {
-                    const response = await fetch(`${API_BASE}/end-of-day`, {
-                      method: 'POST',
-                      headers: { Authorization: `Bearer ${localStorage.getItem('token')}` },
-                    });
-                    if (response.ok) {
-                      window.dispatchEvent(new CustomEvent('refresh-daily-revenue'));
-                      alert('Günsonu alindi');
-                    } else {
-                      alert('Günsonu alinmadi');
-                    }
-                  } catch (error) {
-                    alert('Günsonu alinmadi');
-                  }
-                }}
+                onClick={handleEndOfDay}
                 className="px-3 py-2 bg-red-600 hover:bg-red-700 text-white rounded"
               >
                 Günsonu Al
               </button>
               {isAuthenticated && (
                 <button onClick={handleLogout} className="flex items-center text-red-600">
-                  <LogOut className="h-4 w-4 mr-1" /> Çikis
+                  <LogOut className="h-4 w-4 mr-1" /> Çıkış
                 </button>
               )}
             </div>
@@ -224,15 +231,15 @@ export default function App() {
             <nav className="p-4">
               {[
                 { id: 'personnel', label: 'Personel Giderleri', icon: Users },
-                { id: 'expenses', label: 'Isletme Giderleri', icon: DollarSign },
+                { id: 'expenses', label: 'İşletme Giderleri', icon: DollarSign },
                 { id: 'stock-codes', label: 'Stok Kodu Listesi', icon: Package },
                 { id: 'stock-purchase', label: 'Stok Güncelleme', icon: Package },
-                { id: 'product-prices', label: 'Ürün Fiyatlari', icon: Settings },
+                { id: 'product-prices', label: 'Ürün Fiyatları', icon: Settings },
                 { id: 'costing', label: 'Maliyet Hesaplama', icon: Calculator },
                 { id: 'reports', label: 'Ciro ve Net Kar Raporu', icon: BarChart3 },
                                 { id: 'performance', label: 'Performans Takibi', icon: BarChart3 },
                 { id: 'closings', label: 'Ciro Geçmişi', icon: BarChart3 },
-                { id: 'export', label: 'Veri Yazdirma', icon: BarChart3 },
+                { id: 'export', label: 'Veri Yazdırma', icon: BarChart3 },
               ].filter(item => !isJuniorAdmin || item.id === 'stock-purchase').map(({ id, label, icon: Icon }) => (
                 <button
                   key={id}
@@ -244,6 +251,17 @@ export default function App() {
                 </button>
               ))}
             </nav>
+            {!isJuniorAdmin && (
+              <div className="p-4 pt-0">
+                <button
+                  onClick={() => requireAuth('table-names')}
+                  className={`w-full flex items-center px-4 py-3 text-left rounded-lg mb-2 ${effectivePage === 'table-names' ? 'bg-blue-100 text-blue-700' : 'text-gray-600 hover:bg-gray-100'}`}
+                >
+                  <Settings className="h-4 w-4" />
+                  <span className="ml-3">Masa İsimleri</span>
+                </button>
+              </div>
+            )}
           </aside>
           <main className="flex-1 p-4">
             {effectivePage === 'personnel' && <Personnel />}
@@ -251,6 +269,11 @@ export default function App() {
             {effectivePage === 'stock-codes' && <StockCodes />}
             {effectivePage === 'stock-purchase' && <StockPurchase />}
             {effectivePage === 'product-prices' && <ProductPrices />}
+            {effectivePage === 'table-names' && (
+              <React.Suspense fallback={<div />}> 
+                <TableNames />
+              </React.Suspense>
+            )}
             {effectivePage === 'costing' && <MaliyetHesaplama />}
             {effectivePage === 'reports' && <Reports />}
             {effectivePage === 'performance' && <PerformansTakibi />}
@@ -262,6 +285,7 @@ export default function App() {
     </div>
   );
 }
+
 
 
 

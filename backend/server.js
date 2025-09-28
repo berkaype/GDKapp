@@ -1155,7 +1155,7 @@ app.put('/api/product-prices/:id', authenticateToken, authorizeRoles('superadmin
 
   const normalizedPrice = Number(price);
   if (Number.isNaN(normalizedPrice) || normalizedPrice <= 0) {
-    return res.status(400).json({ error: 'GeÃ§ersiz fiyat' });
+    return res.status(400).json({ error: 'Geçersiz fiyat' });
   }
 
   db.run(`UPDATE product_prices
@@ -1579,6 +1579,18 @@ app.put('/api/orders/:id', (req, res) => {
   });
 });
 
+app.put('/api/orders/:id/note', (req, res) => {
+  const { id } = req.params;
+  const rawNote = typeof (req.body && req.body.note) === 'string' ? req.body.note : '';
+  const normalized = rawNote.replace(/\r/g, '').slice(0, 500);
+  db.run('UPDATE orders SET description = ? WHERE id = ?', [normalized, id], function(err) {
+    if (err) {
+      return res.status(500).json({ error: err.message });
+    }
+    res.json({ note: normalized });
+  });
+});
+
 app.delete('/api/orders/:id', (req, res) => {
   const { id } = req.params;
   
@@ -1671,7 +1683,7 @@ app.post('/api/orders/:orderId/partial-payment', (req, res) => {
   const { items, amount, payment, change, table_number, order_type, description } = req.body || {};
 
   if (!Array.isArray(items) || !items.length) {
-    return res.status(400).json({ error: 'ParÃ§a Ã¶deme iÃ§in geÃ§ersiz Ã¼rÃ¼n listesi' });
+    return res.status(400).json({ error: 'Parça ödeme için geçersiz ürün listesi' });
   }
 
   const sanitizedItems = items
@@ -1688,7 +1700,7 @@ app.post('/api/orders/:orderId/partial-payment', (req, res) => {
     .filter(Boolean);
 
   if (!sanitizedItems.length) {
-    return res.status(400).json({ error: 'ParÃ§a Ã¶deme iÃ§in geÃ§ersiz Ã¼rÃ¼n bilgisi' });
+    return res.status(400).json({ error: 'Parça ödeme için geçersiz ürün bilgisi' });
   }
 
   const computedTotal = sanitizedItems.reduce((sum, item) => sum + item.total_price, 0);
@@ -1709,7 +1721,7 @@ app.post('/api/orders/:orderId/partial-payment', (req, res) => {
 
     const baseTable = table_number != null ? table_number : orderRow.table_number;
     const baseType = order_type || orderRow.order_type;
-    const paymentDescription = description || `ParÃ§a Ã¶deme #${orderId}`;
+    const paymentDescription = description || `Parça ödeme #${orderId}`;
 
     db.serialize(() => {
       db.run('BEGIN TRANSACTION');
@@ -1778,7 +1790,7 @@ app.post('/api/maintenance/cleanup-prices', authenticateToken, (req, res) => {
         if (commitErr) {
           return res.status(500).json({ error: commitErr.message });
         }
-        res.json({ message: 'Fazla fiyat geÃ§miÅŸi temizlendi.' });
+        res.json({ message: 'Fazla fiyat geçmişi temizlendi.' });
       });
     });
   });
@@ -1803,7 +1815,10 @@ function updateOrderTotal(orderId) {
 // Daily Revenue (sum of closed orders' totals, unaccounted)
 app.get('/api/daily-revenue', (req, res) => {
   const today = new Date().toISOString().split('T')[0];
-  const sql = `SELECT COALESCE(SUM(total_amount), 0) AS daily_revenue
+  const sql = `SELECT COALESCE(SUM(CASE
+                   WHEN payment_received IS NOT NULL THEN payment_received - COALESCE(change_given, 0)
+                   ELSE total_amount
+                 END), 0) AS daily_revenue
                FROM orders
                WHERE DATE(order_date) = date(?)
                  AND is_closed = 1
@@ -2166,7 +2181,7 @@ app.get('/api/analytics/forecast', authenticateToken, (req, res) => {
           }
         }
         const pad = (n) => String(n).padStart(2, '0');
-        const rec = `Expect ${(bestScore > 0 ? 'higher' : 'low')} traffic between ${pad(bestStart)}:00â€“${pad((bestStart + 2) % 24)}:00.`;
+        const rec = `Expect ${(bestScore > 0 ? 'higher' : 'low')} traffic between ${pad(bestStart)}:00–${pad((bestStart + 2) % 24)}:00.`;
 
         res.json({
           window: { start: startParam, end: endParam, days },
@@ -2245,22 +2260,48 @@ app.post('/api/daily-closings/cleanup', authenticateToken, authorizeRoles('super
 // End-of-day endpoint
 app.post('/api/end-of-day', authenticateToken, (req, res) => {
   const today = new Date().toISOString().split('T')[0];
-    db.serialize(() => {
-        db.run('UPDATE orders SET is_closed = 1, payment_received = COALESCE(payment_received, total_amount), change_given = COALESCE(change_given, 0) WHERE DATE(order_date) = ? AND is_closed = 0', [today]);
-        db.get('SELECT SUM(total_amount) as total FROM orders WHERE DATE(order_date) = ? AND (accounted = 0 OR accounted IS NULL)', [today], (err, row) => {
-      if (err) { return res.status(500).json({ error: err.message }); }
-      const total = row && row.total ? row.total : 0;
-      db.run('INSERT INTO daily_closings (closing_date, total_amount) VALUES (?, ?)', [today, total], function(insErr) {
-        if (insErr) { return res.status(500).json({ error: insErr.message }); }
-          db.run('UPDATE orders SET accounted = 1 WHERE DATE(order_date) = ?', [today], (uErr) => {
-          if (uErr) { return res.status(500).json({ error: uErr.message }); }
-          db.run('UPDATE orders SET is_closed = 1, payment_received = COALESCE(payment_received, total_amount), change_given = COALESCE(change_given, 0), accounted = 1 WHERE DATE(order_date) = ? AND is_closed = 0', [today], (u2Err) => {
-            if (u2Err) { return res.status(500).json({ error: u2Err.message }); }
-            res.json({ message: 'GÃ¼nsonu alÄ±ndÄ±', archived_amount: total });
-          });
-        });
-      });
-    });
+  db.serialize(() => {
+    db.run(
+      'UPDATE orders SET is_closed = 1, payment_received = COALESCE(payment_received, total_amount), change_given = COALESCE(change_given, 0) WHERE DATE(order_date) = ? AND is_closed = 0',
+      [today]
+    );
+    db.get(
+      `SELECT COALESCE(SUM(CASE
+        WHEN payment_received IS NOT NULL THEN payment_received - COALESCE(change_given, 0)
+        ELSE total_amount
+      END), 0) as total FROM orders WHERE DATE(order_date) = ? AND (accounted = 0 OR accounted IS NULL)`,
+      [today],
+      (err, row) => {
+        if (err) {
+          return res.status(500).json({ error: err.message });
+        }
+        const total = row && row.total ? row.total : 0;
+        db.run(
+          'INSERT INTO daily_closings (closing_date, total_amount) VALUES (?, ?)',
+          [today, total],
+          function(insErr) {
+            if (insErr) {
+              return res.status(500).json({ error: insErr.message });
+            }
+            db.run('UPDATE orders SET accounted = 1 WHERE DATE(order_date) = ?', [today], (uErr) => {
+              if (uErr) {
+                return res.status(500).json({ error: uErr.message });
+              }
+              db.run(
+                'UPDATE orders SET is_closed = 1, payment_received = COALESCE(payment_received, total_amount), change_given = COALESCE(change_given, 0), accounted = 1 WHERE DATE(order_date) = ? AND is_closed = 0',
+                [today],
+                (u2Err) => {
+                  if (u2Err) {
+                    return res.status(500).json({ error: u2Err.message });
+                  }
+                  res.json({ message: 'Günsonu alındı', archived_amount: total });
+                }
+              );
+            });
+          }
+        );
+      }
+    );
   });
 });
 
