@@ -188,7 +188,6 @@ export default function App() {
         <div className="px-6 py-4">
           <div className="flex flex-wrap items-center gap-4">
             <div className="flex items-center gap-4">
-              <h1 className="text-2xl font-bold text-gray-900">Büfe Yönetim Sistemi</h1>
               {effectivePage === 'pos' && (
                 <div className="text-green-700 font-bold text-3xl md:text-4xl font-mono tabular-nums">
                   {now.toLocaleTimeString('tr-TR', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' })}
