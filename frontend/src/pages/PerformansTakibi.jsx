@@ -4,7 +4,113 @@ import { formatCurrency } from '../utils/format.js';
 
 const API_BASE = getApiBase();
 
-const dayNames = ['Pazar', 'Pazartesi', 'Salı', 'Çarşamba', 'Perşembe', 'Cuma', 'Cumartesi'];
+const MON_SAT_CYCLE = ['Pazartesi', 'Sali', 'Carsamba', 'Persembe', 'Cuma', 'Cumartesi'];
+const HOURS_IN_DAY = 24;
+const MINUTES_PER_DAY = HOURS_IN_DAY * 60;
+const cycleLabelForIndex = (index) => MON_SAT_CYCLE[index % MON_SAT_CYCLE.length];
+
+const shiftHourlyBuckets = (buckets = []) => {
+  if (!Array.isArray(buckets)) {
+    return [];
+  }
+  const offsetMinutes = new Date().getTimezoneOffset();
+  const wrapMinutes = HOURS_IN_DAY * 60;
+  const base = Array.from({ length: HOURS_IN_DAY }, (_, hour) => ({
+    hour: String(hour).padStart(2, '0'),
+    transactions: 0,
+    itemsSold: 0,
+  }));
+
+  buckets.forEach((bucket) => {
+    if (!bucket || typeof bucket !== 'object') {
+      return;
+    }
+    const rawHour = Number.parseInt(String(bucket.hour ?? bucket.Hour ?? ''), 10);
+    if (Number.isNaN(rawHour)) {
+      return;
+    }
+
+    const bucketMinutes = rawHour * 60;
+    let localMinutes = bucketMinutes - offsetMinutes;
+    localMinutes %= wrapMinutes;
+    if (localMinutes < 0) {
+      localMinutes += wrapMinutes;
+    }
+
+    const localHour = Math.floor(localMinutes / 60);
+    const items = Number(bucket.itemsSold ?? bucket.items_sold ?? 0);
+    const transactions = Number(bucket.transactions ?? 0);
+    base[localHour].itemsSold += Number.isFinite(items) ? items : 0;
+    base[localHour].transactions += Number.isFinite(transactions) ? transactions : 0;
+  });
+
+  return base;
+};
+
+const parseISODate = (value) => {
+  if (!value) return null;
+  const date = new Date(`${value}T00:00:00`);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+const normaliseMonSatSeries = (series = []) => {
+  if (!Array.isArray(series)) {
+    return [];
+  }
+  const sorted = series
+    .filter((entry) => entry && typeof entry === 'object')
+    .slice()
+    .sort((a, b) => String(a.date || '').localeCompare(String(b.date || '')));
+
+  const filtered = sorted.filter((entry) => {
+    const date = parseISODate(entry.date);
+    return !date || date.getDay() !== 0;
+  });
+
+  return filtered.map((entry, index) => ({
+    ...entry,
+    cycleDay: cycleLabelForIndex(index),
+  }));
+};
+
+const buildMonSatHeatmap = (rawMatrix = []) => {
+  if (!Array.isArray(rawMatrix) || rawMatrix.length === 0) {
+    return MON_SAT_CYCLE.map(() => Array.from({ length: HOURS_IN_DAY }, () => 0));
+  }
+
+  const days = rawMatrix.length;
+  const offsetMinutes = new Date().getTimezoneOffset();
+  const wrapMinutes = Math.max(1, days) * MINUTES_PER_DAY;
+  const shifted = Array.from({ length: days }, () => Array.from({ length: HOURS_IN_DAY }, () => 0));
+
+  for (let day = 0; day < days; day += 1) {
+    for (let hour = 0; hour < HOURS_IN_DAY; hour += 1) {
+      const value = Number(rawMatrix?.[day]?.[hour] ?? 0);
+      const utcMinutes = day * MINUTES_PER_DAY + hour * 60;
+      let localMinutes = utcMinutes - offsetMinutes;
+      localMinutes %= wrapMinutes;
+      if (localMinutes < 0) {
+        localMinutes += wrapMinutes;
+      }
+
+      const localDay = Math.floor(localMinutes / MINUTES_PER_DAY);
+      const localHour = Math.floor((localMinutes % MINUTES_PER_DAY) / 60);
+      if (shifted[localDay]) {
+        shifted[localDay][localHour] = value;
+      }
+    }
+  }
+
+  const baseIndex = days >= 7 ? 1 : 0;
+  const result = [];
+  for (let i = 0; i < MON_SAT_CYCLE.length; i += 1) {
+    const sourceIndex = (baseIndex + i) % days;
+    const row = shifted[sourceIndex] || Array.from({ length: HOURS_IN_DAY }, () => 0);
+    result.push([...row]);
+  }
+
+  return result;
+};
 
 function Section({ title, children, actions }) {
   return (
@@ -185,9 +291,13 @@ function PieChart({ slices = [], size = 200 }) {
   );
 }
 
-function Heatmap({ matrix }) {
-  // matrix: 7 x 24 (0=Pazar .. 6=Cumartesi)
-  const flatMax = Math.max(0, ...matrix.flat());
+function Heatmap({ matrix, dayLabels = [] }) {
+  const rows = Array.isArray(matrix) ? matrix : [];
+  const labels = Array.isArray(dayLabels) && dayLabels.length === rows.length
+    ? dayLabels
+    : rows.map((_, idx) => cycleLabelForIndex(idx));
+
+  const flatMax = Math.max(0, ...rows.flat());
   const toColor = (v) => {
     const t = flatMax > 0 ? v / flatMax : 0;
     const hue = 210 - 210 * t; // blue -> red
@@ -202,11 +312,11 @@ function Heatmap({ matrix }) {
           {Array.from({ length: 24 }, (_, h) => (
             <div key={`h-${h}`} className="text-[10px] text-gray-500 text-center">{String(h).padStart(2, '0')}</div>
           ))}
-          {matrix.map((row, dow) => (
+          {rows.map((row, dow) => (
             <React.Fragment key={`r-${dow}`}>
-              <div className="text-xs text-gray-700 flex items-center justify-end pr-2">{dayNames[dow]}</div>
+              <div className="text-xs text-gray-700 flex items-center justify-end pr-2">{labels[dow] ?? ''}</div>
               {row.map((v, h) => (
-                <div key={`c-${dow}-${h}`} className="h-6 rounded" title={`${dayNames[dow]} ${String(h).padStart(2, '0')}:00 — ${v}`}
+                <div key={`c-${dow}-${h}`} className="h-6 rounded" title={`${labels[dow] ?? ''} ${String(h).padStart(2, '0')}:00 - ${v}`}
                      style={{ backgroundColor: toColor(v) }} />
               ))}
             </React.Fragment>
@@ -293,32 +403,46 @@ export default function PerformansTakibi() {
       });
   }, [daily.items]);
 
-  const hourLabels = useMemo(() => daily.byHour.map((h) => h.hour), [daily.byHour]);
-  const itemsSeries = useMemo(() => daily.byHour.map((h) => h.itemsSold), [daily.byHour]);
-  const txSeries = useMemo(() => daily.byHour.map((h) => h.transactions), [daily.byHour]);
+  const weeklyDaysMonSat = useMemo(() => normaliseMonSatSeries(weekly.byDay), [weekly.byDay]);
 
-  const busyDayLabels = useMemo(() => weekly.byDay.map((d) => {
-    const dt = new Date(d.date + 'T00:00:00');
+  const weeklyRevenueSummary = useMemo(() => {
+    const total = weeklyDaysMonSat.reduce((sum, day) => sum + Number(day.revenue || 0), 0);
+    const average = weeklyDaysMonSat.length ? total / weeklyDaysMonSat.length : 0;
+    const peak = weeklyDaysMonSat.reduce((best, day) => (
+      Number(day.revenue || 0) > Number(best.revenue || 0) ? day : best
+    ), { revenue: 0, date: '', cycleDay: '' });
+
+    return { total, average, peak };
+  }, [weeklyDaysMonSat]);
+
+  const dailyHourBuckets = useMemo(() => shiftHourlyBuckets(daily.byHour), [daily.byHour]);
+  const hourLabels = useMemo(() => dailyHourBuckets.map((h) => h.hour), [dailyHourBuckets]);
+  const itemsSeries = useMemo(() => dailyHourBuckets.map((h) => h.itemsSold), [dailyHourBuckets]);
+  const txSeries = useMemo(() => dailyHourBuckets.map((h) => h.transactions), [dailyHourBuckets]);
+
+  const busyDayLabels = useMemo(() => weeklyDaysMonSat.map((d) => {
     const lbl = d.date ? `${d.date.slice(8, 10)}.${d.date.slice(5, 7)}` : '';
-    const day = dayNames[dt.getDay()];
-    return `${lbl}\n${day}`;
-  }), [weekly.byDay]);
-  const busyDayTx = useMemo(() => weekly.byDay.map((d) => d.transactions), [weekly.byDay]);
+    return `${lbl}\n${d.cycleDay}`;
+  }), [weeklyDaysMonSat]);
+  const busyDayTx = useMemo(() => weeklyDaysMonSat.map((d) => d.transactions), [weeklyDaysMonSat]);
 
-  const revenueLinePts = useMemo(() => weekly.revenueTrend.map((d, i) => {
+  const revenueLinePts = useMemo(() => weeklyDaysMonSat.map((d, i) => {
     const rawDate = d?.date || '';
-    const label = rawDate && rawDate.length >= 10 ? `${rawDate.slice(8, 10)}.${rawDate.slice(5, 7)}` : `#${i + 1}`;
-    return { x: i, y: Number(d?.revenue) || 0, label };
-  }), [weekly.revenueTrend]);
+    const baseLabel = rawDate && rawDate.length >= 10 ? `${rawDate.slice(8, 10)}.${rawDate.slice(5, 7)}` : `#${i + 1}`;
+    return { x: i, y: Number(d?.revenue) || 0, label: `${baseLabel}\n${d.cycleDay}`.trim() };
+  }), [weeklyDaysMonSat]);
 
   const pieSlices = useMemo(() => {
     const palette = ['#2563eb', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#14b8a6', '#f97316'];
-    return (weekly.revenueDistribution || []).map((it, idx) => {
-      const dt = new Date(it.date + 'T00:00:00');
-      const day = dayNames[dt.getDay()];
-      return { label: `${it.date ? `${it.date.slice(8, 10)}.${it.date.slice(5, 7)}` : ''} - ${day}`, value: Number(it.pct || 0), color: palette[idx % palette.length] };
+    const total = weeklyDaysMonSat.reduce((sum, day) => sum + Number(day.revenue || 0), 0);
+    return weeklyDaysMonSat.map((day, idx) => {
+      const baseDate = day.date ? `${day.date.slice(8, 10)}.${day.date.slice(5, 7)}` : day.cycleDay;
+      const pct = total > 0 ? Number(((Number(day.revenue || 0) / total) * 100).toFixed(2)) : 0;
+      return { label: `${baseDate} - ${day.cycleDay}`, value: pct, color: palette[idx % palette.length] };
     });
-  }, [weekly.revenueDistribution]);
+  }, [weeklyDaysMonSat]);
+
+  const heatmapMatrix = useMemo(() => buildMonSatHeatmap(forecast.hourlyHeatmap), [forecast.hourlyHeatmap]);
 
   const summaryCards = [
     { label: 'İşlem Sayısı', value: daily.totals?.transactions || 0, fmt: (v) => v, color: 'text-blue-700' },
@@ -451,12 +575,13 @@ export default function PerformansTakibi() {
             <SimpleLineChart points={revenueLinePts} height={240} yTitle="₺" formatTick={(n) => formatCurrency(n)} />
             <div className="mt-2 text-xs text-gray-600">
               {(() => {
-                const total = weekly.revenueTrend.reduce((a, r) => a + Number(r.revenue || 0), 0);
-                const avg = weekly.revenueTrend.length ? total / weekly.revenueTrend.length : 0;
-                const peak = weekly.revenueTrend.reduce((best, r) => (Number(r.revenue || 0) > Number(best.revenue || 0) ? r : best), { revenue: 0, date: '' });
+                const { total, average, peak } = weeklyRevenueSummary;
+                const peakText = peak?.date
+                  ? `${peak.date.slice(5)} (${formatCurrency(peak.revenue)})${peak.cycleDay ? ` - ${peak.cycleDay}` : ''}`
+                  : '-';
                 return (
                   <span>
-                    Toplam: <span className="font-semibold">{formatCurrency(total)}</span> · Ortalama/Gün: <span className="font-semibold">{formatCurrency(avg)}</span> · Tepe Gün: <span className="font-semibold">{peak.date ? `${peak.date.slice(5)} (${formatCurrency(peak.revenue)})` : '-'}</span>
+                    Toplam: <span className="font-semibold">{formatCurrency(total)}</span> · Ortalama/Gün: <span className="font-semibold">{formatCurrency(average)}</span> · Tepe Gün: <span className="font-semibold">{peakText}</span>
                   </span>
                 );
               })()}
@@ -483,7 +608,7 @@ export default function PerformansTakibi() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2">
             <div className="text-sm font-medium text-gray-700 mb-2">Saatlik Isı Haritası (Geçmiş ortalama, ürün adedi)</div>
-            <Heatmap matrix={forecast.hourlyHeatmap} />
+            <Heatmap matrix={heatmapMatrix} dayLabels={MON_SAT_CYCLE} />
           </div>
           <div className="space-y-3">
             <div className="rounded border border-gray-200 bg-gray-50 px-4 py-3 shadow-sm">
