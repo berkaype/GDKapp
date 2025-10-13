@@ -93,6 +93,13 @@ export default function Reports() {
   const today = new Date();
   const [month, setMonth] = useState(String(today.getMonth() + 1).padStart(2, '0'));
   const [year, setYear] = useState(String(today.getFullYear()));
+  const [filterType, setFilterType] = useState('monthly'); // 'monthly' or 'dateRange'
+  const [startDate, setStartDate] = useState(() => {
+    const d = new Date();
+    d.setDate(1);
+    return d.toISOString().split('T')[0];
+  });
+  const [endDate, setEndDate] = useState(today.toISOString().split('T')[0]);
   const [data, setData] = useState({ revenue: 0, personnel: 0, expenses: 0, stock: 0, creditCard: 0 });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -101,20 +108,35 @@ export default function Reports() {
     const load = async () => {
       setLoading(true);
       setError(null);
-      const start = startOfMonth(year, month);
-      const end = endOfMonth(year, month);
+
+      const isMonthly = filterType === 'monthly';
+      const start = isMonthly ? startOfMonth(year, month) : new Date(startDate);
+      const end = isMonthly ? endOfMonth(year, month) : new Date(endDate);
+
+      const closingsUrl = isMonthly
+        ? `${API_BASE}/daily-closings?month=${month}&year=${year}`
+        : `${API_BASE}/daily-closings?start=${startDate}&end=${endDate}`;
+      const manualSalesUrl = isMonthly
+        ? `${API_BASE}/manual-sales?month=${month}&year=${year}`
+        : `${API_BASE}/manual-sales?start=${startDate}&end=${endDate}`;
+      const creditCardUrl = isMonthly
+        ? `${API_BASE}/credit-card-sales?month=${month}&year=${year}`
+        : `${API_BASE}/credit-card-sales?start=${startDate}&end=${endDate}`;
+      const personnelMonth = isMonthly ? month : startDate.split('-')[1];
+      const personnelYear = isMonthly ? year : startDate.split('-')[0];
+
       const auth = authHeaders();
       try {
         const [closingsRes, expensesRes, stockRes, personnelRes, manualSalesRes] = await Promise.all([
-          fetch(`${API_BASE}/daily-closings?month=${month}&year=${year}`, { headers: authHeaders() }),
+          fetch(closingsUrl, { headers: authHeaders() }),
           fetch(`${API_BASE}/business-expenses`, { headers: authHeaders() }),
           fetch(`${API_BASE}/stock-purchases`, { headers: authHeaders() }),
-          fetch(`${API_BASE}/personnel?month=${month}&year=${year}`, { headers: authHeaders() }),
-          fetch(`${API_BASE}/manual-sales?month=${month}&year=${year}`, { headers: authHeaders() }),
+          fetch(`${API_BASE}/personnel?month=${personnelMonth}&year=${personnelYear}`, { headers: authHeaders() }),
+          fetch(manualSalesUrl, { headers: authHeaders() }),
         ]);
         
         // Fetch credit card sales separately
-        const creditCardRes = await fetch(`${API_BASE}/credit-card-sales?month=${month}&year=${year}`, {
+        const creditCardRes = await fetch(creditCardUrl, {
           headers: auth,
         });
 
@@ -159,10 +181,17 @@ export default function Reports() {
           ? personnelPayload
           : [];
 
-        const personnel = personnelRows.reduce(
+        const monthlyPersonnelCost = personnelRows.reduce(
           (sum, item) => sum + (Number(item.salary) || 0) + (Number(item.sgk_cost) || 0),
           0,
         );
+
+        let personnel = monthlyPersonnelCost;
+        if (!isMonthly) {
+          const daysInMonth = new Date(personnelYear, personnelMonth, 0).getDate();
+          const rangeDays = (end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24) + 1;
+          personnel = (monthlyPersonnelCost / daysInMonth) * rangeDays;
+        }
 
         const creditCard = Array.isArray(creditCardData)
           ? creditCardData.reduce((sum, item) => sum + (Number(item.amount) || 0), 0)
@@ -181,7 +210,7 @@ export default function Reports() {
     };
 
     load();
-  }, [month, year]);
+  }, [month, year, startDate, endDate, filterType]);
 
   const totalCosts = useMemo(
     () => data.personnel + data.expenses + data.stock,
@@ -213,7 +242,12 @@ export default function Reports() {
     [data, net],
   );
 
-  const currentMonthLabel = monthOptions.find((opt) => opt.value === month)?.label || '';
+  const currentPeriodLabel = useMemo(() => {
+    if (filterType === 'monthly') {
+      return `${monthOptions.find((opt) => opt.value === month)?.label || ''} ${year}`;
+    }
+    return `${new Date(startDate).toLocaleDateString('tr-TR')} - ${new Date(endDate).toLocaleDateString('tr-TR')}`;
+  }, [filterType, month, year, startDate, endDate]);
   const currentYear = new Date().getFullYear();
   const yearOptions = Array.from({ length: 6 }, (_, idx) => String(currentYear - idx));
 
@@ -222,26 +256,50 @@ export default function Reports() {
       <div className="bg-white rounded p-6 shadow-sm space-y-4">
         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
           <h2 className="text-xl font-semibold">Ciro ve Net Kâr Raporu</h2>
-          <div className="flex items-center gap-2">
-            <select className="border rounded px-3 py-2" value={month} onChange={(event) => setMonth(event.target.value)}>
-              {monthOptions.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </select>
-            <select className="border rounded px-3 py-2" value={year} onChange={(event) => setYear(event.target.value)}>
-              {yearOptions.map((yr) => (
-                <option key={yr} value={yr}>
-                  {yr}
-                </option>
-              ))}
-            </select>
+          <div className="flex flex-wrap items-center gap-4">
+            <div className="flex items-center gap-2">
+              <label><input type="radio" name="filterType" value="monthly" checked={filterType === 'monthly'} onChange={() => setFilterType('monthly')} /> Aylık</label>
+              <label><input type="radio" name="filterType" value="dateRange" checked={filterType === 'dateRange'} onChange={() => setFilterType('dateRange')} /> Tarih Aralığı</label>
+            </div>
+            {filterType === 'monthly' ? (
+              <div className="flex items-center gap-2">
+                <select className="border rounded px-3 py-2" value={month} onChange={(event) => setMonth(event.target.value)}>
+                  {monthOptions.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+                <select className="border rounded px-3 py-2" value={year} onChange={(event) => setYear(event.target.value)}>
+                  {yearOptions.map((yr) => (
+                    <option key={yr} value={yr}>
+                      {yr}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <input
+                  type="date"
+                  className="border rounded px-3 py-2"
+                  value={startDate}
+                  onChange={(e) => setStartDate(e.target.value)}
+                />
+                <span>-</span>
+                <input
+                  type="date"
+                  className="border rounded px-3 py-2"
+                  value={endDate}
+                  onChange={(e) => setEndDate(e.target.value)}
+                />
+              </div>
+            )}
           </div>
         </div>
 
         <div className="text-sm text-gray-500">
-          {currentMonthLabel && `${currentMonthLabel} ${year}`} dönemi için hesaplanan değerler gösterilmektedir.
+          {currentPeriodLabel} dönemi için hesaplanan değerler gösterilmektedir.
         </div>
 
         {error && <div className="rounded bg-red-100 text-red-700 px-4 py-2">{error}</div>}

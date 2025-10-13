@@ -2749,16 +2749,21 @@ app.post('/api/daily-closings/cleanup', authenticateToken, authorizeRoles('super
 
 // Credit Card Sales Routes
 app.get('/api/credit-card-sales', authenticateToken, (req, res) => {
-  const { month, year } = req.query;
-  if (!month || !year) {
-    return res.status(400).json({ message: 'Ay ve yıl bilgisi gereklidir.' });
+  const { month, year, start, end } = req.query;
+  let sql = 'SELECT date, amount FROM credit_card_sales';
+  const params = [];
+
+  if (month && year) {
+    sql += ' WHERE strftime("%m", date) = ? AND strftime("%Y", date) = ?';
+    params.push(String(month).padStart(2, '0'), String(year));
+  } else if (start && end) {
+    sql += ' WHERE date(date) BETWEEN date(?) AND date(?)';
+    params.push(start, end);
+  } else {
+    return res.status(400).json({ message: 'Filtreleme için tarih parametreleri gereklidir.' });
   }
 
-  const sql = `SELECT date, amount FROM credit_card_sales
-               WHERE strftime('%m', date) = ? AND strftime('%Y', date) = ?
-               ORDER BY date ASC`;
-  
-  const params = [String(month).padStart(2, '0'), String(year)];
+  sql += ' ORDER BY date ASC';
 
   db.all(sql, params, (err, rows) => {
     if (err) {
@@ -2807,15 +2812,21 @@ app.delete('/api/credit-card-sales/:date', authenticateToken, authorizeRoles('su
 
 // Manual Sales Routes
 app.get('/api/manual-sales', authenticateToken, (req, res) => {
-  const { month, year } = req.query;
-  if (!month || !year) {
-    return res.status(400).json({ message: 'Ay ve yıl bilgisi gereklidir.' });
+  const { month, year, start, end } = req.query;
+  let sql = 'SELECT * FROM manual_sales';
+  const params = [];
+
+  if (month && year) {
+    sql += ' WHERE strftime("%m", sale_datetime) = ? AND strftime("%Y", sale_datetime) = ?';
+    params.push(String(month).padStart(2, '0'), String(year));
+  } else if (start && end) {
+    sql += ' WHERE date(sale_datetime) BETWEEN date(?) AND date(?)';
+    params.push(start, end);
+  } else {
+    return res.status(400).json({ message: 'Filtreleme için tarih parametreleri gereklidir.' });
   }
 
-  const sql = `SELECT * FROM manual_sales
-               WHERE strftime('%m', sale_datetime) = ? AND strftime('%Y', sale_datetime) = ?
-               ORDER BY sale_datetime DESC`;
-  const params = [String(month).padStart(2, '0'), String(year)];
+  sql += ' ORDER BY sale_datetime DESC';
 
   db.all(sql, params, (err, rows) => {
     if (err) return res.status(500).json({ message: 'Veritabanı hatası', error: err.message });
