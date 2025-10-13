@@ -355,6 +355,15 @@ db.serialize(() => {
     amount REAL NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
+
+  // Manuel satışlar için yeni tablo
+  db.run(`CREATE TABLE IF NOT EXISTS manual_sales (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    sale_datetime DATETIME NOT NULL,
+    product_name TEXT NOT NULL,
+    amount REAL NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
 });
 
 function cleanupDuplicates() {
@@ -2752,6 +2761,74 @@ app.post('/api/credit-card-sales', authenticateToken, authorizeRoles('superadmin
       return res.status(500).json({ message: 'Kayıt sırasında veritabanı hatası oluştu.', error: err.message });
     }
     res.status(201).json({ date, amount: Number(amount) });
+  });
+});
+
+app.delete('/api/credit-card-sales/:date', authenticateToken, authorizeRoles('superadmin'), (req, res) => {
+  const { date } = req.params;
+  if (!date) {
+    return res.status(400).json({ message: 'Tarih gereklidir.' });
+  }
+
+  db.run('DELETE FROM credit_card_sales WHERE date = ?', [date], function(err) {
+    if (err) {
+      return res.status(500).json({ message: 'Silme sırasında veritabanı hatası oluştu.', error: err.message });
+    }
+    if (this.changes === 0) {
+      return res.status(404).json({ message: 'Kayıt bulunamadı.' });
+    }
+    res.status(200).json({ message: 'Kayıt başarıyla silindi.' });
+  });
+});
+
+// Manual Sales Routes
+app.get('/api/manual-sales', authenticateToken, (req, res) => {
+  const { month, year } = req.query;
+  if (!month || !year) {
+    return res.status(400).json({ message: 'Ay ve yıl bilgisi gereklidir.' });
+  }
+
+  const sql = `SELECT * FROM manual_sales
+               WHERE strftime('%m', sale_datetime) = ? AND strftime('%Y', sale_datetime) = ?
+               ORDER BY sale_datetime DESC`;
+  const params = [String(month).padStart(2, '0'), String(year)];
+
+  db.all(sql, params, (err, rows) => {
+    if (err) return res.status(500).json({ message: 'Veritabanı hatası', error: err.message });
+    res.json(rows);
+  });
+});
+
+app.post('/api/manual-sales', authenticateToken, authorizeRoles('superadmin'), (req, res) => {
+  const { sale_datetime, product_name, amount } = req.body;
+  if (!sale_datetime || !product_name || !amount || Number(amount) <= 0) {
+    return res.status(400).json({ message: 'Tüm alanlar doldurulmalı ve tutar pozitif olmalıdır.' });
+  }
+  const sql = 'INSERT INTO manual_sales (sale_datetime, product_name, amount) VALUES (?, ?, ?)';
+  db.run(sql, [sale_datetime, product_name, Number(amount)], function(err) {
+    if (err) return res.status(500).json({ message: 'Kayıt hatası', error: err.message });
+    res.status(201).json({ id: this.lastID, ...req.body });
+  });
+});
+
+app.put('/api/manual-sales/:id', authenticateToken, authorizeRoles('superadmin'), (req, res) => {
+  const { id } = req.params;
+  const { sale_datetime, product_name, amount } = req.body;
+  if (!sale_datetime || !product_name || !amount || Number(amount) <= 0) {
+    return res.status(400).json({ message: 'Tüm alanlar doldurulmalı ve tutar pozitif olmalıdır.' });
+  }
+  const sql = 'UPDATE manual_sales SET sale_datetime = ?, product_name = ?, amount = ? WHERE id = ?';
+  db.run(sql, [sale_datetime, product_name, Number(amount), id], function(err) {
+    if (err) return res.status(500).json({ message: 'Güncelleme hatası', error: err.message });
+    res.status(200).json({ message: 'Kayıt güncellendi.' });
+  });
+});
+
+app.delete('/api/manual-sales/:id', authenticateToken, authorizeRoles('superadmin'), (req, res) => {
+  const { id } = req.params;
+  db.run('DELETE FROM manual_sales WHERE id = ?', [id], function(err) {
+    if (err) return res.status(500).json({ message: 'Silme hatası', error: err.message });
+    res.status(200).json({ message: 'Kayıt silindi.' });
   });
 });
 

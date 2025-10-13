@@ -105,11 +105,12 @@ export default function Reports() {
       const end = endOfMonth(year, month);
       const auth = authHeaders();
       try {
-        const [closingsRes, expensesRes, stockRes, personnelRes] = await Promise.all([
+        const [closingsRes, expensesRes, stockRes, personnelRes, manualSalesRes] = await Promise.all([
           fetch(`${API_BASE}/daily-closings?month=${month}&year=${year}`, { headers: authHeaders() }),
           fetch(`${API_BASE}/business-expenses`, { headers: authHeaders() }),
           fetch(`${API_BASE}/stock-purchases`, { headers: authHeaders() }),
           fetch(`${API_BASE}/personnel?month=${month}&year=${year}`, { headers: authHeaders() }),
+          fetch(`${API_BASE}/manual-sales?month=${month}&year=${year}`, { headers: authHeaders() }),
         ]);
         
         // Fetch credit card sales separately
@@ -129,10 +130,15 @@ export default function Reports() {
         const expensesData = expensesRes.ok ? await expensesRes.json() : [];
         const stockData = stockRes.ok ? await stockRes.json() : [];
         const personnelPayload = personnelRes.ok ? await personnelRes.json() : [];
+        const manualSalesData = manualSalesRes.ok ? await manualSalesRes.json() : [];
         const creditCardData = creditCardRes.ok ? await creditCardRes.json() : [];
 
-        const revenue = Array.isArray(closings)
+        const closingRevenue = Array.isArray(closings)
           ? closings.reduce((sum, item) => sum + (Number(item.total_amount) || 0), 0)
+          : 0;
+        
+        const manualRevenue = Array.isArray(manualSalesData)
+          ? manualSalesData.reduce((sum, item) => sum + (Number(item.amount) || 0), 0)
           : 0;
 
         const expenses = Array.isArray(expensesData)
@@ -161,6 +167,8 @@ export default function Reports() {
         const creditCard = Array.isArray(creditCardData)
           ? creditCardData.reduce((sum, item) => sum + (Number(item.amount) || 0), 0)
           : 0;
+
+        const revenue = closingRevenue + manualRevenue;
 
         setData({ revenue, personnel, expenses, stock, creditCard });
       } catch (err) {
