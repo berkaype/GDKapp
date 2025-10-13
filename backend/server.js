@@ -348,6 +348,13 @@ db.serialize(() => {
     total_amount REAL NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
+
+  // Kredi kartı satışları için yeni tablo
+  db.run(`CREATE TABLE IF NOT EXISTS credit_card_sales (
+    date DATE PRIMARY KEY,
+    amount REAL NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  )`);
 });
 
 function cleanupDuplicates() {
@@ -2707,6 +2714,47 @@ app.post('/api/daily-closings/cleanup', authenticateToken, authorizeRoles('super
   });
 });
 
+// Credit Card Sales Routes
+app.get('/api/credit-card-sales', authenticateToken, (req, res) => {
+  const { month, year } = req.query;
+  if (!month || !year) {
+    return res.status(400).json({ message: 'Ay ve yıl bilgisi gereklidir.' });
+  }
+
+  const sql = `SELECT date, amount FROM credit_card_sales
+               WHERE strftime('%m', date) = ? AND strftime('%Y', date) = ?
+               ORDER BY date ASC`;
+  
+  const params = [String(month).padStart(2, '0'), String(year)];
+
+  db.all(sql, params, (err, rows) => {
+    if (err) {
+      res.status(500).json({ message: 'Veritabanı hatası', error: err.message });
+      return;
+    }
+    res.json(rows);
+  });
+});
+
+app.post('/api/credit-card-sales', authenticateToken, authorizeRoles('superadmin'), (req, res) => {
+  const { date, amount } = req.body;
+
+  if (!date || amount === undefined || amount === null || Number(amount) < 0) {
+    return res.status(400).json({ message: 'Geçerli bir tarih ve tutar girilmelidir.' });
+  }
+
+  const sql = `INSERT INTO credit_card_sales (date, amount, created_at)
+               VALUES (?, ?, CURRENT_TIMESTAMP)
+               ON CONFLICT(date) DO UPDATE SET amount = excluded.amount`;
+
+  db.run(sql, [date, Number(amount)], function(err) {
+    if (err) {
+      return res.status(500).json({ message: 'Kayıt sırasında veritabanı hatası oluştu.', error: err.message });
+    }
+    res.status(201).json({ date, amount: Number(amount) });
+  });
+});
+
 // End-of-day endpoint
 app.post('/api/end-of-day', authenticateToken, (req, res) => {
   const today = new Date().toISOString().split('T')[0];
@@ -2793,5 +2841,3 @@ process.on('SIGINT', () => {
     process.exit(0);
   });
 });
-
-

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { ChevronLeft, Users, DollarSign, Package, BarChart3, Settings, LogOut, Lock, Calculator, Coins } from 'lucide-react';
+import { ChevronLeft, Users, DollarSign, Package, BarChart3, Settings, LogOut, Lock, Calculator, Coins, CreditCard } from 'lucide-react';
 
 import POS from './pages/POS.jsx';
 import Personnel from './pages/Personnel.jsx';
@@ -12,6 +12,7 @@ import PerformansTakibi from './pages/PerformansTakibi.jsx';
 import CiroGecmisi from './pages/CiroGecmisi.jsx';
 import VeriYazdirma from './pages/VeriYazdirma.jsx';
 import MaliyetHesaplama from './pages/MaliyetHesaplama.jsx';
+import GunSonuIslemleri from './pages/GunSonuIslemleri.jsx';
 import AylikMasraf from './pages/AylikMasraf.jsx';
 const TableNames = React.lazy(() => import('./pages/TableNames.jsx'));
 import { formatCurrency } from './utils/format.js';
@@ -240,6 +241,7 @@ export default function App() {
                 { id: 'reports', label: 'Ciro ve Net Kar Raporu', icon: BarChart3 },
                 { id: 'performance', label: 'Performans Takibi', icon: BarChart3 },
                 { id: 'closings', label: 'Ciro Geçmişi', icon: BarChart3 },
+                { id: 'end-of-day-ops', label: 'Gün Sonu İşlemleri', icon: CreditCard },
                 { id: 'export', label: 'Veri Yazdırma', icon: BarChart3 },
               ].filter(item => !isJuniorAdmin || item.id === 'stock-purchase').map(({ id, label, icon: Icon }) => (
                 <button
@@ -280,6 +282,7 @@ export default function App() {
             {effectivePage === 'reports' && <Reports />}
             {effectivePage === 'performance' && <PerformansTakibi />}
             {effectivePage === 'closings' && <CiroGecmisi />}
+            {effectivePage === 'end-of-day-ops' && <GunSonuIslemleri />}
             {effectivePage === 'export' && <VeriYazdirma />}
           </main>
         </div>
@@ -287,7 +290,3 @@ export default function App() {
     </div>
   );
 }
-
-
-
-

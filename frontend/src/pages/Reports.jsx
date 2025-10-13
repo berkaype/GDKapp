@@ -93,7 +93,7 @@ export default function Reports() {
   const today = new Date();
   const [month, setMonth] = useState(String(today.getMonth() + 1).padStart(2, '0'));
   const [year, setYear] = useState(String(today.getFullYear()));
-  const [data, setData] = useState({ revenue: 0, personnel: 0, expenses: 0, stock: 0 });
+  const [data, setData] = useState({ revenue: 0, personnel: 0, expenses: 0, stock: 0, creditCard: 0 });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
@@ -103,6 +103,7 @@ export default function Reports() {
       setError(null);
       const start = startOfMonth(year, month);
       const end = endOfMonth(year, month);
+      const auth = authHeaders();
       try {
         const [closingsRes, expensesRes, stockRes, personnelRes] = await Promise.all([
           fetch(`${API_BASE}/daily-closings?month=${month}&year=${year}`, { headers: authHeaders() }),
@@ -110,6 +111,11 @@ export default function Reports() {
           fetch(`${API_BASE}/stock-purchases`, { headers: authHeaders() }),
           fetch(`${API_BASE}/personnel?month=${month}&year=${year}`, { headers: authHeaders() }),
         ]);
+        
+        // Fetch credit card sales separately
+        const creditCardRes = await fetch(`${API_BASE}/credit-card-sales?month=${month}&year=${year}`, {
+          headers: auth,
+        });
 
         if (closingsRes.status === 401) {
           throw new Error('Yetkisiz');
@@ -123,6 +129,7 @@ export default function Reports() {
         const expensesData = expensesRes.ok ? await expensesRes.json() : [];
         const stockData = stockRes.ok ? await stockRes.json() : [];
         const personnelPayload = personnelRes.ok ? await personnelRes.json() : [];
+        const creditCardData = creditCardRes.ok ? await creditCardRes.json() : [];
 
         const revenue = Array.isArray(closings)
           ? closings.reduce((sum, item) => sum + (Number(item.total_amount) || 0), 0)
@@ -151,11 +158,15 @@ export default function Reports() {
           0,
         );
 
-        setData({ revenue, personnel, expenses, stock });
+        const creditCard = Array.isArray(creditCardData)
+          ? creditCardData.reduce((sum, item) => sum + (Number(item.amount) || 0), 0)
+          : 0;
+
+        setData({ revenue, personnel, expenses, stock, creditCard });
       } catch (err) {
         console.error(err);
         setError('Veriler getirilemedi. Lütfen tekrar deneyin.');
-        setData({ revenue: 0, personnel: 0, expenses: 0, stock: 0 });
+        setData({ revenue: 0, personnel: 0, expenses: 0, stock: 0, creditCard: 0 });
       } finally {
         setLoading(false);
       }
@@ -173,23 +184,25 @@ export default function Reports() {
   const chartData = useMemo(
     () => [
       { key: 'revenue', label: 'Ciro', value: data.revenue, color: 'bg-blue-500' },
+      { key: 'creditCard', label: 'Kredi Kartı', value: data.creditCard, color: 'bg-purple-500' },
       { key: 'personnel', label: 'Personel', value: data.personnel, color: 'bg-orange-500' },
       { key: 'expenses', label: 'İşletme Giderleri', value: data.expenses, color: 'bg-red-500' },
       { key: 'stock', label: 'Stok', value: data.stock, color: 'bg-yellow-500' },
       { key: 'net', label: 'Net Kâr', value: net, color: net >= 0 ? 'bg-green-600' : 'bg-rose-500' },
     ],
-    [data.revenue, data.personnel, data.expenses, data.stock, net],
+    [data, net],
   );
 
   const summaryItems = useMemo(
     () => [
       { label: 'Toplam Ciro', value: data.revenue, accent: 'text-blue-600' },
+      { label: 'Kredi Kartı', value: data.creditCard, accent: 'text-purple-600' },
       { label: 'Personel', value: data.personnel, accent: 'text-orange-600' },
       { label: 'İşletme Giderleri', value: data.expenses, accent: 'text-red-600' },
       { label: 'Stok', value: data.stock, accent: 'text-yellow-600' },
       { label: 'Net Kâr', value: net, accent: 'text-green-700' },
     ],
-    [data.revenue, data.personnel, data.expenses, data.stock, net],
+    [data, net],
   );
 
   const currentMonthLabel = monthOptions.find((opt) => opt.value === month)?.label || '';

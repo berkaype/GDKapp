@@ -1,4 +1,4 @@
-﻿import React, { useEffect, useMemo, useState } from 'react';
+﻿﻿import React, { useEffect, useMemo, useState } from 'react';
 import { getApiBase, authHeaders } from '../utils/api.js';
 import { formatCurrency } from '../utils/format.js';
 
@@ -16,11 +16,17 @@ export default function CiroGecmisi() {
   const load = async () => {
     try {
       const r = await fetch(`${API_BASE}/daily-closings?month=${month}&year=${year}`, { headers: authHeaders() });
+      const ccRes = await fetch(`${API_BASE}/credit-card-sales?month=${month}&year=${year}`, { headers: authHeaders() });
+
       if (r.ok) {
         const payload = await r.json();
-        setRows(payload);
+        const ccData = ccRes.ok ? await ccRes.json() : [];
+        const ccMap = new Map(ccData.map(item => [item.date, item.amount]));
+        const mergedRows = payload.map(row => ({ ...row, cc_amount: ccMap.get(row.closing_date) || 0 }));
+        setRows(mergedRows);
       }
     } catch (e) {
+      setRows([]);
       console.error(e);
     }
   };
@@ -191,6 +197,9 @@ export default function CiroGecmisi() {
                               </span>
                               <span>
                                 Günlük Ciro: <span className="font-semibold text-blue-600">{formatCurrency(selectedClosing?.total_amount || 0)}</span>
+                              </span>
+                              <span>
+                                Kredi Kartı: <span className="font-medium text-gray-800">{formatCurrency(selectedClosing?.cc_amount || 0)}</span>
                               </span>
                             </div>
                             {itemsLoading && (
