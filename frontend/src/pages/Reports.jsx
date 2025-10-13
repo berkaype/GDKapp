@@ -158,10 +158,6 @@ export default function Reports() {
         const closingRevenue = Array.isArray(closings)
           ? closings.reduce((sum, item) => sum + (Number(item.total_amount) || 0), 0)
           : 0;
-        
-        const manualRevenue = Array.isArray(manualSalesData)
-          ? manualSalesData.reduce((sum, item) => sum + (Number(item.amount) || 0), 0)
-          : 0;
 
         const expenses = Array.isArray(expensesData)
           ? expensesData
@@ -197,7 +193,7 @@ export default function Reports() {
           ? creditCardData.reduce((sum, item) => sum + (Number(item.amount) || 0), 0)
           : 0;
 
-        const revenue = closingRevenue + manualRevenue;
+        const revenue = closingRevenue;
 
         setData({ revenue, personnel, expenses, stock, creditCard });
       } catch (err) {
