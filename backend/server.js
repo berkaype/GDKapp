@@ -2075,15 +2075,22 @@ function updateOrderTotal(orderId) {
 // Daily Revenue (sum of closed orders' totals, unaccounted)
 app.get('/api/daily-revenue', (req, res) => {
   const today = new Date().toISOString().split('T')[0];
-  const sql = `SELECT COALESCE(SUM(CASE
-                   WHEN payment_received IS NOT NULL THEN payment_received - COALESCE(change_given, 0)
-                   ELSE total_amount
-                 END), 0) AS daily_revenue
-               FROM orders
-               WHERE DATE(order_date) = date(?)
-                 AND is_closed = 1
-                 AND (accounted = 0 OR accounted IS NULL)`;
-  db.get(sql, [today], (err, row) => {
+  const sql = `
+    SELECT SUM(daily_revenue) as daily_revenue FROM (
+      SELECT COALESCE(SUM(CASE
+        WHEN payment_received IS NOT NULL THEN payment_received - COALESCE(change_given, 0)
+        ELSE total_amount
+      END), 0) AS daily_revenue
+      FROM orders
+      WHERE DATE(order_date) = date(?) AND is_closed = 1 AND (accounted = 0 OR accounted IS NULL)
+      
+      UNION ALL
+
+      SELECT COALESCE(SUM(amount), 0) as daily_revenue
+      FROM manual_sales
+      WHERE DATE(sale_datetime) = date(?)
+    )`;
+  db.get(sql, [today, today], (err, row) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
@@ -2224,42 +2231,49 @@ app.get('/api/analytics/daily', authenticateToken, (req, res) => {
   const dateParam = (req.query.date || new Date().toISOString().split('T')[0]).slice(0, 10);
 
   const byHourSql = `
-    SELECT strftime('%H', o.order_date) AS hour,
-           COUNT(DISTINCT o.id) AS transactions,
-           COALESCE(SUM(oi.quantity), 0) AS items_sold,
-           COALESCE(SUM(oi.total_price), 0) AS revenue
-    FROM orders o
-    LEFT JOIN order_items oi ON oi.order_id = o.id
-    WHERE date(o.order_date) = date(?)
-    GROUP BY hour
-    ORDER BY hour`;
+    SELECT hour,
+           SUM(transactions) as transactions,
+           SUM(items_sold) as items_sold,
+           SUM(revenue) as revenue
+    FROM (
+        SELECT strftime('%H', o.order_date) AS hour, COUNT(DISTINCT o.id) AS transactions, COALESCE(SUM(oi.quantity), 0) AS items_sold, COALESCE(SUM(oi.total_price), 0) AS revenue
+        FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.id
+        WHERE date(o.order_date) = date(?) GROUP BY hour
+        UNION ALL
+        SELECT strftime('%H', ms.sale_datetime) AS hour, COUNT(ms.id) AS transactions, COUNT(ms.id) AS items_sold, COALESCE(SUM(ms.amount), 0) AS revenue
+        FROM manual_sales ms
+        WHERE date(ms.sale_datetime) = date(?) GROUP BY hour
+    )
+    GROUP BY hour ORDER BY hour`;
 
   const totalsSql = `
-    SELECT COUNT(DISTINCT o.id) AS transactions,
-           COALESCE(SUM(oi.quantity), 0) AS items_sold,
-           COALESCE(SUM(oi.total_price), 0) AS revenue
-    FROM orders o
-    LEFT JOIN order_items oi ON oi.order_id = o.id
-    WHERE date(o.order_date) = date(?)`;
+    SELECT SUM(transactions) as transactions, SUM(items_sold) as items_sold, SUM(revenue) as revenue
+    FROM (
+        SELECT COUNT(DISTINCT o.id) AS transactions, COALESCE(SUM(oi.quantity), 0) AS items_sold, COALESCE(SUM(oi.total_price), 0) AS revenue
+        FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.id
+        WHERE date(o.order_date) = date(?)
+        UNION ALL
+        SELECT COUNT(ms.id) AS transactions, COUNT(ms.id) AS items_sold, COALESCE(SUM(ms.amount), 0) AS revenue
+        FROM manual_sales ms
+        WHERE date(ms.sale_datetime) = date(?)
+    )`;
 
-  db.all(byHourSql, [dateParam], (err, hourRows) => {
+  db.all(byHourSql, [dateParam, dateParam], (err, hourRows) => {
     if (err) return res.status(500).json({ error: err.message });
 
-    db.get(totalsSql, [dateParam], (tErr, totals) => {
+    db.get(totalsSql, [dateParam, dateParam], (tErr, totals) => {
       if (tErr) return res.status(500).json({ error: tErr.message });
 
       const itemsSql = `
-        SELECT
-          COALESCE(oi.product_name, 'Diğer Ürün') AS name,
-          SUM(oi.quantity) AS quantity,
-          SUM(oi.total_price) AS revenue
-        FROM orders o
-        JOIN order_items oi ON oi.order_id = o.id
-        WHERE date(o.order_date) = date(?)
-        GROUP BY name
-        ORDER BY revenue DESC, quantity DESC, name ASC`;
+        SELECT name, SUM(quantity) as quantity, SUM(revenue) as revenue FROM (
+            SELECT COALESCE(oi.product_name, 'Diğer Ürün') AS name, SUM(oi.quantity) AS quantity, SUM(oi.total_price) AS revenue
+            FROM orders o JOIN order_items oi ON oi.order_id = o.id WHERE date(o.order_date) = date(?) GROUP BY name
+            UNION ALL
+            SELECT product_name as name, COUNT(id) as quantity, SUM(amount) as revenue
+            FROM manual_sales WHERE date(sale_datetime) = date(?) GROUP BY name
+        ) GROUP BY name ORDER BY revenue DESC, quantity DESC, name ASC`;
 
-      db.all(itemsSql, [dateParam], (itemsErr, itemRows) => {
+      db.all(itemsSql, [dateParam, dateParam], (itemsErr, itemRows) => {
         if (itemsErr) return res.status(500).json({ error: itemsErr.message });
 
         const byHourMap = new Map((hourRows || []).map(r => [r.hour, r]));
@@ -2444,30 +2458,30 @@ app.get('/api/analytics/weekly', authenticateToken, (req, res) => {
   const startParam = (req.query.start || new Date(Date.now() - 6 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]).slice(0, 10);
 
   const byDaySql = `
-    SELECT date(o.order_date) AS d,
-           COUNT(DISTINCT o.id) AS transactions,
-           COALESCE(SUM(oi.quantity), 0) AS items_sold,
-           COALESCE(SUM(oi.total_price), 0) AS revenue
-    FROM orders o
-    LEFT JOIN order_items oi ON oi.order_id = o.id
-    WHERE date(o.order_date) BETWEEN date(?) AND date(?)
-    GROUP BY d
-    ORDER BY d`;
+    SELECT d, SUM(transactions) as transactions, SUM(items_sold) as items_sold, SUM(revenue) as revenue FROM (
+        SELECT date(o.order_date) AS d, COUNT(DISTINCT o.id) AS transactions, COALESCE(SUM(oi.quantity), 0) AS items_sold, COALESCE(SUM(oi.total_price), 0) AS revenue
+        FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.id
+        WHERE date(o.order_date) BETWEEN date(?) AND date(?) GROUP BY d
+        UNION ALL
+        SELECT date(ms.sale_datetime) AS d, COUNT(ms.id) AS transactions, COUNT(ms.id) AS items_sold, COALESCE(SUM(ms.amount), 0) AS revenue
+        FROM manual_sales ms
+        WHERE date(ms.sale_datetime) BETWEEN date(?) AND date(?) GROUP BY d
+    ) GROUP BY d ORDER BY d`;
 
   const prevByDaySql = `
-    SELECT date(o.order_date) AS d,
-           COUNT(DISTINCT o.id) AS transactions,
-           COALESCE(SUM(oi.quantity), 0) AS items_sold,
-           COALESCE(SUM(oi.total_price), 0) AS revenue
-    FROM orders o
-    LEFT JOIN order_items oi ON oi.order_id = o.id
-    WHERE date(o.order_date) BETWEEN date(?, '-7 day') AND date(?, '-7 day')
-    GROUP BY d
-    ORDER BY d`;
+    SELECT d, SUM(transactions) as transactions, SUM(items_sold) as items_sold, SUM(revenue) as revenue FROM (
+        SELECT date(o.order_date) AS d, COUNT(DISTINCT o.id) AS transactions, COALESCE(SUM(oi.quantity), 0) AS items_sold, COALESCE(SUM(oi.total_price), 0) AS revenue
+        FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.id
+        WHERE date(o.order_date) BETWEEN date(?, '-7 day') AND date(?, '-7 day') GROUP BY d
+        UNION ALL
+        SELECT date(ms.sale_datetime) AS d, COUNT(ms.id) AS transactions, COUNT(ms.id) AS items_sold, COALESCE(SUM(ms.amount), 0) AS revenue
+        FROM manual_sales ms
+        WHERE date(ms.sale_datetime) BETWEEN date(?, '-7 day') AND date(?, '-7 day') GROUP BY d
+    ) GROUP BY d ORDER BY d`;
 
-  db.all(byDaySql, [startParam, endParam], (err, rows) => {
+  db.all(byDaySql, [startParam, endParam, startParam, endParam], (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
-    db.all(prevByDaySql, [startParam, endParam], (pErr, prevRows) => {
+    db.all(prevByDaySql, [startParam, endParam, startParam, endParam], (pErr, prevRows) => {
       if (pErr) return res.status(500).json({ error: pErr.message });
 
       const sum = (list, key) => list.reduce((acc, r) => acc + Number(r[key] || 0), 0);
@@ -2525,29 +2539,30 @@ app.get('/api/analytics/forecast', authenticateToken, (req, res) => {
   const startParam = startDate.toISOString().split('T')[0];
 
   const heatSql = `
-    SELECT CAST(strftime('%w', o.order_date) AS INTEGER) AS dow,
-           strftime('%H', o.order_date) AS hour,
-           COUNT(DISTINCT o.id) AS transactions,
-           COALESCE(SUM(oi.quantity), 0) AS items_sold
-    FROM orders o
-    LEFT JOIN order_items oi ON oi.order_id = o.id
-    WHERE date(o.order_date) BETWEEN date(?) AND date(?)
-    GROUP BY dow, hour
-    ORDER BY dow, hour`;
+    SELECT dow, hour, SUM(transactions) as transactions, SUM(items_sold) as items_sold FROM (
+        SELECT CAST(strftime('%w', o.order_date) AS INTEGER) AS dow, strftime('%H', o.order_date) AS hour, COUNT(DISTINCT o.id) AS transactions, COALESCE(SUM(oi.quantity), 0) AS items_sold
+        FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.id
+        WHERE date(o.order_date) BETWEEN date(?) AND date(?) GROUP BY dow, hour
+        UNION ALL
+        SELECT CAST(strftime('%w', ms.sale_datetime) AS INTEGER) AS dow, strftime('%H', ms.sale_datetime) AS hour, COUNT(ms.id) AS transactions, COUNT(ms.id) AS items_sold
+        FROM manual_sales ms
+        WHERE date(ms.sale_datetime) BETWEEN date(?) AND date(?) GROUP BY dow, hour
+    ) GROUP BY dow, hour ORDER BY dow, hour`;
 
   const byDaySql = `
-    SELECT date(o.order_date) AS d,
-           COUNT(DISTINCT o.id) AS transactions,
-           COALESCE(SUM(oi.quantity), 0) AS items_sold
-    FROM orders o
-    LEFT JOIN order_items oi ON oi.order_id = o.id
-    WHERE date(o.order_date) BETWEEN date(?) AND date(?)
-    GROUP BY d
-    ORDER BY d`;
+    SELECT d, SUM(transactions) as transactions, SUM(items_sold) as items_sold FROM (
+        SELECT date(o.order_date) AS d, COUNT(DISTINCT o.id) AS transactions, COALESCE(SUM(oi.quantity), 0) AS items_sold
+        FROM orders o LEFT JOIN order_items oi ON oi.order_id = o.id
+        WHERE date(o.order_date) BETWEEN date(?) AND date(?) GROUP BY d
+        UNION ALL
+        SELECT date(ms.sale_datetime) AS d, COUNT(ms.id) AS transactions, COUNT(ms.id) AS items_sold
+        FROM manual_sales ms
+        WHERE date(ms.sale_datetime) BETWEEN date(?) AND date(?) GROUP BY d
+    ) GROUP BY d ORDER BY d`;
 
-  db.all(heatSql, [startParam, endParam], (hErr, heatRows) => {
+  db.all(heatSql, [startParam, endParam, startParam, endParam], (hErr, heatRows) => {
     if (hErr) return res.status(500).json({ error: hErr.message });
-    db.all(byDaySql, [startParam, endParam], (dErr, byDayRows) => {
+    db.all(byDaySql, [startParam, endParam, startParam, endParam], (dErr, byDayRows) => {
       if (dErr) return res.status(500).json({ error: dErr.message });
 
       // Count days per weekday in the window
@@ -2629,18 +2644,27 @@ app.get('/api/analytics/model', authenticateToken, (req, res) => {
 // Daily closings history
 app.get('/api/daily-closings', authenticateToken, (req, res) => {
   const { month, year, start, end } = req.query;
-  let sql = 'SELECT closing_date, total_amount FROM daily_closings';
+  let sql = `
+    SELECT
+      d.closing_date,
+      SUM(d.total_amount) as total_amount
+    FROM (
+      SELECT closing_date, total_amount FROM daily_closings
+      UNION ALL
+      SELECT date(sale_datetime) as closing_date, amount as total_amount FROM manual_sales
+    ) d
+  `;
   const params = [];
   if (month && year) {
-    sql += ' WHERE strftime("%m", closing_date) = ? AND strftime("%Y", closing_date) = ?';
+    sql += ' WHERE strftime("%m", d.closing_date) = ? AND strftime("%Y", d.closing_date) = ?';
     params.push(String(month).padStart(2, '0'));
     params.push(String(year));
   } else if (start && end) {
-    sql += ' WHERE date(closing_date) BETWEEN date(?) AND date(?)';
+    sql += ' WHERE date(d.closing_date) BETWEEN date(?) AND date(?)';
     params.push(start);
     params.push(end);
   }
-  sql += ' ORDER BY date(closing_date) DESC';
+  sql += ' GROUP BY d.closing_date ORDER BY date(d.closing_date) DESC';
   db.all(sql, params, (err, rows) => {
     if (err) {
       return res.status(500).json({ error: err.message });

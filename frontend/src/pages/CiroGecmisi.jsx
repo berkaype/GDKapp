@@ -1,4 +1,4 @@
-﻿﻿import React, { useEffect, useMemo, useState } from 'react';
+﻿import React, { useEffect, useMemo, useState } from 'react';
 import { getApiBase, authHeaders } from '../utils/api.js';
 import { formatCurrency } from '../utils/format.js';
 
@@ -17,12 +17,24 @@ export default function CiroGecmisi() {
     try {
       const r = await fetch(`${API_BASE}/daily-closings?month=${month}&year=${year}`, { headers: authHeaders() });
       const ccRes = await fetch(`${API_BASE}/credit-card-sales?month=${month}&year=${year}`, { headers: authHeaders() });
-
+      const msRes = await fetch(`${API_BASE}/manual-sales?month=${month}&year=${year}`, { headers: authHeaders() });
+      
       if (r.ok) {
         const payload = await r.json();
         const ccData = ccRes.ok ? await ccRes.json() : [];
+        const msData = msRes.ok ? await msRes.json() : [];
+
         const ccMap = new Map(ccData.map(item => [item.date, item.amount]));
-        const mergedRows = payload.map(row => ({ ...row, cc_amount: ccMap.get(row.closing_date) || 0 }));
+        const msMap = new Map();
+        msData.forEach(item => {
+            const dateKey = item.sale_datetime.split('T')[0];
+            msMap.set(dateKey, (msMap.get(dateKey) || 0) + item.amount);
+        });
+
+        const mergedRows = payload.map(row => {
+          const manualAmount = msMap.get(row.closing_date) || 0;
+          return { ...row, cc_amount: ccMap.get(row.closing_date) || 0, ms_amount: manualAmount };
+        });
         setRows(mergedRows);
       }
     } catch (e) {
@@ -200,6 +212,9 @@ export default function CiroGecmisi() {
                               </span>
                               <span>
                                 Kredi Kartı: <span className="font-medium text-gray-800">{formatCurrency(selectedClosing?.cc_amount || 0)}</span>
+                              </span>
+                              <span>
+                                Manuel Satış: <span className="font-medium text-gray-800">{formatCurrency(selectedClosing?.ms_amount || 0)}</span>
                               </span>
                             </div>
                             {itemsLoading && (

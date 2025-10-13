@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { getApiBase, authHeaders } from '../utils/api.js';
 import { formatCurrency } from '../utils/format.js';
 import { Edit, Trash2 } from 'lucide-react';
@@ -8,8 +8,14 @@ const API_BASE = getApiBase();
 const now = new Date();
 const todayDate = now.toISOString().split('T')[0];
 const todayTime = now.toTimeString().split(' ')[0].substring(0, 5);
+const currentMonth = String(now.getMonth() + 1).padStart(2, '0');
+const currentYear = String(now.getFullYear());
 
 export default function GunSonuIslemleri() {
+  // Main page filters
+  const [month, setMonth] = useState(currentMonth);
+  const [year, setYear] = useState(currentYear);
+
   // State for Credit Card Sales
   const [ccDate, setCcDate] = useState(todayDate);
   const [ccAmount, setCcAmount] = useState('');
@@ -29,10 +35,25 @@ export default function GunSonuIslemleri() {
   const [msError, setMsError] = useState(null);
   const [msSuccess, setMsSuccess] = useState(null);
   const [editingMsId, setEditingMsId] = useState(null);
+  const [productSuggestions, setProductSuggestions] = useState([]);
+  const [allProducts, setAllProducts] = useState([]);
+
+  useEffect(() => {
+    const fetchProducts = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/product-prices`, { headers: authHeaders() });
+        if (res.ok) {
+          const data = await res.json();
+          setAllProducts(Array.isArray(data) ? data.map(p => p.product_name) : []);
+        }
+      } catch (e) {
+        console.error("Ürünler alınamadı:", e);
+      }
+    };
+    fetchProducts();
+  }, []);
 
   const fetchCcRecords = useCallback(async () => {
-    if (!ccDate) return;
-    const [year, month] = ccDate.split('-');
     setCcLoading(true);
     try {
       const response = await fetch(`${API_BASE}/credit-card-sales?month=${month}&year=${year}`, { headers: authHeaders() });
@@ -48,10 +69,9 @@ export default function GunSonuIslemleri() {
     } finally {
       setCcLoading(false);
     }
-  }, [ccDate]);
+  }, [month, year]);
 
   const fetchMsRecords = useCallback(async () => {
-    const [year, month] = msDate.split('-');
     setMsLoading(true);
     try {
       const response = await fetch(`${API_BASE}/manual-sales?month=${month}&year=${year}`, { headers: authHeaders() });
@@ -67,15 +87,27 @@ export default function GunSonuIslemleri() {
     } finally {
       setMsLoading(false);
     }
-  }, [msDate]);
+  }, [month, year]);
 
   useEffect(() => {
     fetchCcRecords();
-  }, [fetchCcRecords]);
-
-  useEffect(() => {
     fetchMsRecords();
-  }, [fetchMsRecords]);
+  }, [fetchCcRecords, fetchMsRecords]);
+
+  const handleProductSearch = (query) => {
+    setMsProduct(query);
+    if (!query.trim()) {
+      setProductSuggestions([]);
+      return;
+    }
+    const lowerQuery = query.toLowerCase();
+    setProductSuggestions(allProducts.filter(p => p.toLowerCase().includes(lowerQuery)).slice(0, 5));
+  };
+
+  const selectProduct = (productName) => {
+    setMsProduct(productName);
+    setProductSuggestions([]);
+  };
 
   const handleCcSubmit = async (e) => {
     e.preventDefault();
@@ -204,10 +236,29 @@ export default function GunSonuIslemleri() {
     setMsAmount('');
   };
 
+  const monthOptions = useMemo(() => [
+    { value: '01', label: 'Ocak' }, { value: '02', label: 'Şubat' }, { value: '03', label: 'Mart' },
+    { value: '04', label: 'Nisan' }, { value: '05', label: 'Mayıs' }, { value: '06', label: 'Haziran' },
+    { value: '07', label: 'Temmuz' }, { value: '08', label: 'Ağustos' }, { value: '09', label: 'Eylül' },
+    { value: '10', label: 'Ekim' }, { value: '11', label: 'Kasım' }, { value: '12', label: 'Aralık' },
+  ], []);
+
+  const yearOptions = useMemo(() => Array.from({ length: 5 }, (_, i) => String(currentYear - i)), []);
+
   return (
     <div className="p-4 space-y-4">
+      <div className="bg-white rounded p-4 shadow-sm flex items-center gap-4">
+        <h2 className="text-lg font-semibold">Dönem Seçimi</h2>
+        <select className="border rounded px-3 py-2" value={month} onChange={(e) => setMonth(e.target.value)}>
+          {monthOptions.map(opt => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+        </select>
+        <select className="border rounded px-3 py-2" value={year} onChange={(e) => setYear(e.target.value)}>
+          {yearOptions.map(y => <option key={y} value={y}>{y}</option>)}
+        </select>
+      </div>
+
       <div className="bg-white rounded p-4 shadow-sm">
-        <h2 className="text-xl font-semibold mb-4">Gün Sonu İşlemleri - Kredi Kartı Cirosu</h2>
+        <h2 className="text-xl font-semibold mb-4">Kredi Kartı Ciro Girişi</h2>
         <form onSubmit={handleCcSubmit} className="space-y-3 max-w-md">
           {ccError && <div className="p-3 bg-red-100 text-red-700 rounded">{ccError}</div>}
           {ccSuccess && <div className="p-3 bg-green-100 text-green-700 rounded">{ccSuccess}</div>}
@@ -245,7 +296,7 @@ export default function GunSonuIslemleri() {
       </div>
 
       <div className="bg-white rounded p-4 shadow-sm">
-        <h3 className="text-lg font-semibold mb-3">Kredi Kartı Ciro Kayıtları ({new Date(ccDate).toLocaleDateString('tr-TR', { month: 'long', year: 'numeric' })})</h3>
+        <h3 className="text-lg font-semibold mb-3">Kredi Kartı Ciro Kayıtları ({monthOptions.find(m => m.value === month)?.label} {year})</h3>
         {ccLoading ? <p>Yükleniyor...</p> : ccRecords.length > 0 ? (
           <ul className="space-y-2">
             {ccRecords.map(record => (
@@ -281,7 +332,20 @@ export default function GunSonuIslemleri() {
           </div>
           <div>
             <label htmlFor="msProduct" className="block text-sm font-medium text-gray-700">Ürün Adı</label>
-            <input type="text" id="msProduct" value={msProduct} onChange={(e) => setMsProduct(e.target.value)} className="mt-1 block w-full border rounded px-3 py-2" placeholder="Örn: Döner" required />
+            <div className="relative">
+              <input type="text" id="msProduct" value={msProduct} onChange={(e) => handleProductSearch(e.target.value)} className="mt-1 block w-full border rounded px-3 py-2" placeholder="Ürün adını yazın..." required autoComplete="off" />
+              {productSuggestions.length > 0 && (
+                <ul className="absolute z-10 w-full bg-white border rounded mt-1 max-h-48 overflow-y-auto">
+                  {productSuggestions.map(p => (
+                    <li
+                      key={p}
+                      onClick={() => selectProduct(p)}
+                      className="px-3 py-2 cursor-pointer hover:bg-gray-100"
+                    >{p}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
           </div>
           <div>
             <label htmlFor="msAmount" className="block text-sm font-medium text-gray-700">Tutar</label>
@@ -295,7 +359,7 @@ export default function GunSonuIslemleri() {
       </div>
 
       <div className="bg-white rounded p-4 shadow-sm">
-        <h3 className="text-lg font-semibold mb-3">Manuel Satış Kayıtları ({new Date(msDate).toLocaleDateString('tr-TR', { month: 'long', year: 'numeric' })})</h3>
+        <h3 className="text-lg font-semibold mb-3">Manuel Satış Kayıtları ({monthOptions.find(m => m.value === month)?.label} {year})</h3>
         {msLoading ? <p>Yükleniyor...</p> : msRecords.length > 0 ? (
           <ul className="space-y-2">
             {msRecords.map(record => (
