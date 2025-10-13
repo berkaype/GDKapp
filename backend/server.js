@@ -2075,22 +2075,15 @@ function updateOrderTotal(orderId) {
 // Daily Revenue (sum of closed orders' totals, unaccounted)
 app.get('/api/daily-revenue', (req, res) => {
   const today = new Date().toISOString().split('T')[0];
-  const sql = `
-    SELECT SUM(daily_revenue) as daily_revenue FROM (
-      SELECT COALESCE(SUM(CASE
-        WHEN payment_received IS NOT NULL THEN payment_received - COALESCE(change_given, 0)
-        ELSE total_amount
-      END), 0) AS daily_revenue
-      FROM orders
-      WHERE DATE(order_date) = date(?) AND is_closed = 1 AND (accounted = 0 OR accounted IS NULL)
-      
-      UNION ALL
-
-      SELECT COALESCE(SUM(amount), 0) as daily_revenue
-      FROM manual_sales
-      WHERE DATE(sale_datetime) = date(?)
-    )`;
-  db.get(sql, [today, today], (err, row) => {
+  const sql = `SELECT COALESCE(SUM(CASE
+                   WHEN payment_received IS NOT NULL THEN payment_received - COALESCE(change_given, 0)
+                   ELSE total_amount
+                 END), 0) AS daily_revenue
+               FROM orders
+               WHERE DATE(order_date) = date(?)
+                 AND is_closed = 1
+                 AND (accounted = 0 OR accounted IS NULL)`;
+  db.get(sql, [today], (err, row) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
