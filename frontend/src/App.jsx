@@ -15,6 +15,7 @@ import MaliyetHesaplama from './pages/MaliyetHesaplama.jsx';
 import GunSonuIslemleri from './pages/GunSonuIslemleri.jsx';
 import AylikMasraf from './pages/AylikMasraf.jsx';
 const TableNames = React.lazy(() => import('./pages/TableNames.jsx'));
+import StokGuncellemeTakibi from './pages/StokGuncellemeTakibi.jsx';
 import { formatCurrency } from './utils/format.js';
 import { getApiBase } from './utils/api.js';
 
@@ -235,6 +236,7 @@ export default function App() {
                 { id: 'expenses', label: 'İşletme Giderleri', icon: DollarSign },
                 { id: 'stock-codes', label: 'Stok Kodu Listesi', icon: Package },
                 { id: 'stock-purchase', label: 'Stok Güncelleme', icon: Package },
+                { id: 'stock-purchase-tracking', label: 'Stok Güncelleme Takibi', icon: BarChart3 },
                 { id: 'product-prices', label: 'Ürün Fiyatları', icon: Settings },
                 { id: 'costing', label: 'Maliyet Hesaplama', icon: Calculator },
                 { id: 'monthly-cost', label: 'Aylık Masraf', icon: Coins },
@@ -243,7 +245,7 @@ export default function App() {
                 { id: 'closings', label: 'Ciro Geçmişi', icon: BarChart3 },
                 { id: 'end-of-day-ops', label: 'Gün Sonu İşlemleri', icon: CreditCard },
                 { id: 'export', label: 'Veri Yazdırma', icon: BarChart3 },
-              ].filter(item => !isJuniorAdmin || item.id === 'stock-purchase').map(({ id, label, icon: Icon }) => (
+              ].filter(item => !isJuniorAdmin || ['stock-purchase', 'stock-purchase-tracking'].includes(item.id)).map(({ id, label, icon: Icon }) => (
                 <button
                   key={id}
                   onClick={() => requireAuth(id)}
@@ -271,6 +273,7 @@ export default function App() {
             {effectivePage === 'expenses' && <Expenses />}
             {effectivePage === 'stock-codes' && <StockCodes />}
             {effectivePage === 'stock-purchase' && <StockPurchase />}
+            {effectivePage === 'stock-purchase-tracking' && <StokGuncellemeTakibi />}
             {effectivePage === 'product-prices' && <ProductPrices />}
             {effectivePage === 'table-names' && (
               <React.Suspense fallback={<div />}> 
