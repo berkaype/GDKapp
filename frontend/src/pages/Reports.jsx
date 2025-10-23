@@ -103,6 +103,12 @@ export default function Reports() {
   const [data, setData] = useState({ revenue: 0, personnel: 0, expenses: 0, stock: 0, creditCard: 0 });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [includedCosts, setIncludedCosts] = useState({
+    creditCard: true,
+    personnel: true,
+    expenses: true,
+    stock: true,
+  });
 
   useEffect(() => {
     const load = async () => {
@@ -214,6 +220,17 @@ export default function Reports() {
   );
   const net = useMemo(() => data.revenue - totalCosts, [data.revenue, totalCosts]);
 
+  const simulatedNet = useMemo(() => {
+    const simulatedRevenue = includedCosts.creditCard ? data.revenue - data.creditCard : data.revenue;
+    let simulatedExpenses = 0;
+    if (includedCosts.personnel) simulatedExpenses += data.personnel;
+    if (includedCosts.expenses) simulatedExpenses += data.expenses;
+    if (includedCosts.stock) simulatedExpenses += data.stock;
+    return simulatedRevenue - simulatedExpenses;
+  }, [data, includedCosts]);
+
+  const handleCostToggle = (key) => setIncludedCosts(prev => ({ ...prev, [key]: !prev[key] }));
+
   const chartData = useMemo(
     () => [
       { key: 'revenue', label: 'Ciro', value: data.revenue, color: 'bg-blue-500' },
@@ -314,6 +331,62 @@ export default function Reports() {
             </div>
             <div className="flex-1">
               <BarChart data={chartData} />
+              <div className="mt-8 border-t-2 border-gray-200 pt-6">
+                <h3 className="text-lg font-semibold mb-2">Net Kâr Simülasyonu</h3>
+                <p className="text-sm text-gray-500 mb-4">
+                  Farklı kalemleri hesaba katıp çıkararak kârlılığın nasıl değiştiğini anında görün.
+                </p>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <label className="flex items-center justify-between p-3 border rounded-lg cursor-pointer hover:bg-gray-50 transition-colors has-[:checked]:bg-blue-50 has-[:checked]:border-blue-200">
+                      <span className="font-medium text-gray-700">Kredi Kartı</span>
+                      <div className="relative inline-flex items-center cursor-pointer">
+                        <input type="checkbox" className="sr-only peer" checked={includedCosts.creditCard} onChange={() => handleCostToggle('creditCard')} />
+                        <div className="w-11 h-6 bg-gray-200 rounded-full peer peer-focus:ring-2 peer-focus:ring-blue-300 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                      </div>
+                    </label>
+                    <label className="flex items-center justify-between p-3 border rounded-lg cursor-pointer hover:bg-gray-50 transition-colors has-[:checked]:bg-blue-50 has-[:checked]:border-blue-200">
+                      <span className="font-medium text-gray-700">Personel</span>
+                      <div className="relative inline-flex items-center cursor-pointer">
+                        <input type="checkbox" className="sr-only peer" checked={includedCosts.personnel} onChange={() => handleCostToggle('personnel')} />
+                        <div className="w-11 h-6 bg-gray-200 rounded-full peer peer-focus:ring-2 peer-focus:ring-blue-300 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                      </div>
+                    </label>
+                    <label className="flex items-center justify-between p-3 border rounded-lg cursor-pointer hover:bg-gray-50 transition-colors has-[:checked]:bg-blue-50 has-[:checked]:border-blue-200">
+                      <span className="font-medium text-gray-700">İşletme</span>
+                      <div className="relative inline-flex items-center cursor-pointer">
+                        <input type="checkbox" className="sr-only peer" checked={includedCosts.expenses} onChange={() => handleCostToggle('expenses')} />
+                        <div className="w-11 h-6 bg-gray-200 rounded-full peer peer-focus:ring-2 peer-focus:ring-blue-300 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                      </div>
+                    </label>
+                    <label className="flex items-center justify-between p-3 border rounded-lg cursor-pointer hover:bg-gray-50 transition-colors has-[:checked]:bg-blue-50 has-[:checked]:border-blue-200">
+                      <span className="font-medium text-gray-700">Stok</span>
+                      <div className="relative inline-flex items-center cursor-pointer">
+                        <input type="checkbox" className="sr-only peer" checked={includedCosts.stock} onChange={() => handleCostToggle('stock')} />
+                        <div className="w-11 h-6 bg-gray-200 rounded-full peer peer-focus:ring-2 peer-focus:ring-blue-300 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                      </div>
+                    </label>
+                  </div>
+                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-6 text-center">
+                    <div className="text-sm text-blue-800">Simüle Edilen Net Kâr</div>
+                    <div className={`mt-2 text-4xl font-bold ${simulatedNet >= 0 ? 'text-blue-700' : 'text-rose-600'}`}>
+                      {formatCurrency(simulatedNet)}
+                    </div>
+                    <div className="mt-4 text-xs text-gray-500">
+                      <p>
+                        <span className="font-semibold">Ciro:</span> {formatCurrency(includedCosts.creditCard ? data.revenue : data.revenue - data.creditCard)}
+                      </p>
+                      <p>
+                        <span className="font-semibold">Toplam Gider:</span> {formatCurrency(
+                          (includedCosts.personnel ? data.personnel : 0) +
+                          (includedCosts.expenses ? data.expenses : 0) +
+                          (includedCosts.stock ? data.stock : 0)
+                        )}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         )}
