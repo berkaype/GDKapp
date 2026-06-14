@@ -122,7 +122,7 @@ export default function Expenses() {
       if (!response.ok) {
         throw new Error('create-failed');
       }
-      setForm({ expense_name: '', expense_date: getDefaultDate(), amount: '' });
+      setForm((prev) => ({ expense_name: '', expense_date: prev.expense_date, amount: '' }));
       setStatus({ type: 'success', message: 'Gider kaydedildi.' });
       await load();
     } catch (error) {

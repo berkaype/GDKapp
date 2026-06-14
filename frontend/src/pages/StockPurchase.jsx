@@ -116,7 +116,7 @@ export default function StockPurchase() {
         body: JSON.stringify(payload),
       });
       if (r.ok) {
-        setForm(createInitialForm());
+        setForm((prev) => ({ ...createInitialForm(), purchase_date: prev.purchase_date }));
         setQuery('');
         const refreshed = await fetch(`${API_BASE}/stock-purchases`, { headers: authHeaders() });
         if (refreshed.ok) {

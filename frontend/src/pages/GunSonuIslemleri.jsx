@@ -185,8 +185,8 @@ export default function GunSonuIslemleri() {
 
       if (response.ok) {
         setMsSuccess(`Satış başarıyla ${editingMsId ? 'güncellendi' : 'kaydedildi'}.`);
-        setMsDate(todayDate);
-        setMsTime(todayTime);
+        setMsDate((d) => d);
+        setMsTime((t) => t);
         setMsProduct('');
         setMsAmount('');
         setEditingMsId(null);
@@ -230,8 +230,8 @@ export default function GunSonuIslemleri() {
 
   const cancelEditMs = () => {
     setEditingMsId(null);
-    setMsDate(todayDate);
-    setMsTime(todayTime);
+    setMsDate((d) => d);
+    setMsTime((t) => t);
     setMsProduct('');
     setMsAmount('');
   };
