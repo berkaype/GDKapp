@@ -5,9 +5,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "vite --host --clearScreen=false",
-    "build": "vite build",
-    "preview": "vite preview"
+    "dev": "vite --configLoader runner --host --clearScreen=false",
+    "build": "vite build --configLoader runner",
+    "preview": "vite preview --configLoader runner"
   },
   "keywords": [
     "bufe",

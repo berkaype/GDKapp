@@ -48,7 +48,7 @@ const sanitizeProductStyles = (value) => {
   }, {});
 };
 
-export default function POS({ onAdminClick, onOrderClosed }) {
+export default function POS({ onAdminClick, onOrderClosed, canManageLayout = false }) {
   const [activeOrders, setActiveOrders] = useState([]);
   const [currentOrder, setCurrentOrder] = useState(null);
   const [products, setProducts] = useState([]);
@@ -67,6 +67,11 @@ export default function POS({ onAdminClick, onOrderClosed }) {
   const [selectedItems, setSelectedItems] = useState({});
   const paymentInputRef = useRef(null);
   const noteSaveTimer = useRef(null);
+  const layoutSaveTimer = useRef(null);
+  const persistedLayoutRef = useRef(null);
+  const [layoutHydrated, setLayoutHydrated] = useState(false);
+  const [layoutLoadError, setLayoutLoadError] = useState('');
+  const [layoutReloadKey, setLayoutReloadKey] = useState(0);
   const [tables, setTables] = useState([]);
   const [tableMap, setTableMap] = useState(() => new Map());
 
@@ -176,40 +181,71 @@ export default function POS({ onAdminClick, onOrderClosed }) {
 
   // Load POS layout from backend
   useEffect(() => {
+    const controller = new AbortController();
+    let cancelled = false;
+    setLayoutHydrated(false);
+    setLayoutLoadError('');
     (async () => {
       try {
-        const res = await fetch(`${API_BASE}/pos-layout`);
-        if (res.ok) {
-          const data = await res.json();
-          if (typeof data.positionsLocked === 'boolean') setPositionsLocked(data.positionsLocked);
-          setProductOrder(data.productOrder && typeof data.productOrder === 'object' ? data.productOrder : {});
-          setCategoryOrder(Array.isArray(data.categoryOrder) ? data.categoryOrder : []);
-          setProductStyles(sanitizeProductStyles(data.productStyles));
+        const res = await fetch(`${API_BASE}/pos-layout`, { signal: controller.signal });
+        if (!res.ok) {
+          throw new Error(`POS layout returned HTTP ${res.status}`);
         }
+        const data = await res.json();
+        if (cancelled) return;
+        const hydratedLayout = {
+          positionsLocked: typeof data.positionsLocked === 'boolean' ? data.positionsLocked : true,
+          productOrder: data.productOrder && typeof data.productOrder === 'object' ? data.productOrder : {},
+          categoryOrder: Array.isArray(data.categoryOrder) ? data.categoryOrder : [],
+          productStyles: sanitizeProductStyles(data.productStyles),
+        };
+        persistedLayoutRef.current = JSON.stringify(hydratedLayout);
+        setPositionsLocked(hydratedLayout.positionsLocked);
+        setProductOrder(hydratedLayout.productOrder);
+        setCategoryOrder(hydratedLayout.categoryOrder);
+        setProductStyles(hydratedLayout.productStyles);
+        setLayoutHydrated(true);
       } catch (e) {
+        if (e?.name === 'AbortError' || cancelled) return;
         console.error(e);
+        setLayoutLoadError('POS düzeni yüklenemedi.');
       }
     })();
-  }, []);
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [layoutReloadKey]);
 
   // Persist POS layout to backend (debounced)
-  const layoutSaveTimer = useRef(null);
   useEffect(() => {
+    if (!layoutHydrated || !canManageLayout) {
+      return undefined;
+    }
+
+    const payload = {
+      positionsLocked,
+      productOrder,
+      categoryOrder,
+      productStyles: sanitizeProductStyles(productStyles),
+    };
+    const serializedLayout = JSON.stringify(payload);
+    if (serializedLayout === persistedLayoutRef.current) {
+      return undefined;
+    }
+
     try {
       if (layoutSaveTimer.current) clearTimeout(layoutSaveTimer.current);
       layoutSaveTimer.current = setTimeout(async () => {
         try {
-          const payload = {
-            positionsLocked,
-            productOrder,
-            categoryOrder,
-            productStyles: sanitizeProductStyles(productStyles),
-          };
-          await fetch(`${API_BASE}/pos-layout`, {
+          const response = await fetch(`${API_BASE}/pos-layout`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json', ...authHeaders() },
-            body: JSON.stringify(payload),
+            body: serializedLayout,
           });
+          if (response.ok) {
+            persistedLayoutRef.current = serializedLayout;
+          }
         } catch (e) {
           console.error(e);
         }
@@ -220,7 +256,7 @@ export default function POS({ onAdminClick, onOrderClosed }) {
     return () => {
       if (layoutSaveTimer.current) clearTimeout(layoutSaveTimer.current);
     };
-  }, [positionsLocked, productOrder, categoryOrder, productStyles]);
+  }, [canManageLayout, layoutHydrated, positionsLocked, productOrder, categoryOrder, productStyles]);
 
   useEffect(() => {
     if (!selectionMode) {
@@ -1005,7 +1041,7 @@ export default function POS({ onAdminClick, onOrderClosed }) {
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2">
             <h3 className="text-lg font-semibold">{category}</h3>
-            {!positionsLocked && (
+            {layoutEditingEnabled && (
               <div className="flex flex-col rounded bg-white/90 shadow-sm">
                 <button
                   type="button"
@@ -1032,7 +1068,7 @@ export default function POS({ onAdminClick, onOrderClosed }) {
               </div>
             )}
           </div>
-          {!positionsLocked && (
+          {layoutEditingEnabled && (
             <span className="text-xs text-gray-500">Sıralamak için okları kullanın</span>
           )}
         </div>
@@ -1056,7 +1092,7 @@ export default function POS({ onAdminClick, onOrderClosed }) {
                     {formatCurrency(product.price)}
                   </div>
                 </button>
-                {!positionsLocked && (
+                {layoutEditingEnabled && (
                   <>
                     <div className="absolute top-2 right-2 flex flex-col rounded bg-white/90 shadow">
                       <button
@@ -1206,6 +1242,8 @@ export default function POS({ onAdminClick, onOrderClosed }) {
     [drinkGroups.length]
   );
 
+  const layoutEditingEnabled = canManageLayout && layoutHydrated && !positionsLocked;
+
   const foodColumnClass = useMemo(
     () => (drinkGroups.length ? 'space-y-6 lg:w-2/3' : 'space-y-6 w-full'),
     [drinkGroups.length]
@@ -1308,12 +1346,28 @@ export default function POS({ onAdminClick, onOrderClosed }) {
                   : `Paket #${currentOrder.takeaway_seq ?? currentOrder.id}`}
               </h2>
               <div className="flex gap-2 flex-wrap">
-                <button
-                  onClick={togglePositionLock}
-                  className={`px-4 py-2 rounded-lg border ${positionsLocked ? 'border-gray-300 text-gray-600' : 'border-blue-500 text-blue-600 bg-blue-50'}`}
-                >
-                  {positionsLocked ? 'Pozisyon Kilidini Aç' : 'Pozisyon Kilidini Kilitle'}
-                </button>
+                {canManageLayout && (
+                  layoutLoadError ? (
+                    <button
+                      type="button"
+                      onClick={() => setLayoutReloadKey((current) => current + 1)}
+                      className="px-4 py-2 rounded-lg border border-red-300 text-red-700"
+                    >
+                      Düzeni Yeniden Yükle
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={!layoutHydrated}
+                      onClick={togglePositionLock}
+                      className={`px-4 py-2 rounded-lg border disabled:cursor-not-allowed disabled:opacity-50 ${positionsLocked ? 'border-gray-300 text-gray-600' : 'border-blue-500 text-blue-600 bg-blue-50'}`}
+                    >
+                      {!layoutHydrated
+                        ? 'Düzen Yükleniyor...'
+                        : (positionsLocked ? 'Pozisyon Kilidini Aç' : 'Pozisyon Kilidini Kilitle')}
+                    </button>
+                  )
+                )}
                 <button
                   onClick={() => setShowCustomProduct(true)}
                   className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700"

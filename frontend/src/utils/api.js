@@ -1,7 +1,7 @@
 export const getApiBase = () => {
-  const fromEnv = import.meta.env.VITE_API_BASE;
+  const fromEnv = import.meta.env.VITE_API_BASE?.trim();
   if (fromEnv) {
-    return fromEnv.replace(/\/$/, '');
+    return fromEnv.replace(/\/+$/, '');
   }
 
   if (import.meta.env.DEV) {

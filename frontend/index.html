@@ -22,8 +22,16 @@
             }
           }catch(_e){}
         }
-        window.addEventListener('error', function(e){ show('JS error: ' + (e && (e.message || (e.error && e.error.message))), (e && e.error && e.error.stack) || (e && e.filename+':'+e.lineno+':'+e.colno)); });
-        window.addEventListener('unhandledrejection', function(e){ var r=e&&e.reason; show('Promise error: ' + (r && (r.message || r)), (r && r.stack) || ''); });
+        window.addEventListener('error', function(e){
+          var root = document.getElementById('root');
+          if(root && !root.hasChildNodes()){
+            show('JS error: ' + (e && (e.message || (e.error && e.error.message))), (e && e.error && e.error.stack) || (e && e.filename+':'+e.lineno+':'+e.colno));
+          }
+        });
+        window.addEventListener('unhandledrejection', function(e){
+          var r=e&&e.reason;
+          console.error('Unhandled promise rejection:', r);
+        });
       })();
     </script>
     <script type="module" src="/src/main.jsx"></script>

@@ -26,12 +26,12 @@ function endOfMonth(year, month) {
   return new Date(Number(year), Number(month), 0);
 }
 
-function isWithinMonth(dateStr, start, end) {
-  const dt = new Date(dateStr);
-  if (Number.isNaN(dt.getTime())) {
+function isWithinRange(dateStr, start, end) {
+  const date = String(dateStr || '').split('T')[0];
+  if (!date) {
     return false;
   }
-  return dt >= start && dt <= end;
+  return date >= start && date <= end;
 }
 
 function BarChart({ data }) {
@@ -111,20 +111,27 @@ export default function Reports() {
   });
 
   useEffect(() => {
+    const controller = new AbortController();
+
     const load = async () => {
       setLoading(true);
       setError(null);
 
       const isMonthly = filterType === 'monthly';
-      const start = isMonthly ? startOfMonth(year, month) : new Date(startDate);
-      const end = isMonthly ? endOfMonth(year, month) : new Date(endDate);
+      const start = isMonthly ? startOfMonth(year, month) : new Date(`${startDate}T00:00:00`);
+      const end = isMonthly ? endOfMonth(year, month) : new Date(`${endDate}T00:00:00`);
+      const periodStart = isMonthly ? `${year}-${month}-01` : startDate;
+      const periodEnd = isMonthly
+        ? `${year}-${month}-${String(end.getDate()).padStart(2, '0')}`
+        : endDate;
 
       const closingsUrl = isMonthly
         ? `${API_BASE}/daily-closings?month=${month}&year=${year}`
         : `${API_BASE}/daily-closings?start=${startDate}&end=${endDate}`;
-      const manualSalesUrl = isMonthly
-        ? `${API_BASE}/manual-sales?month=${month}&year=${year}`
-        : `${API_BASE}/manual-sales?start=${startDate}&end=${endDate}`;
+      const expensesUrl = isMonthly
+        ? `${API_BASE}/business-expenses?month=${month}&year=${year}`
+        : `${API_BASE}/business-expenses?start=${startDate}&end=${endDate}`;
+      const stockUrl = `${API_BASE}/stock-purchases?start=${periodStart}&end=${periodEnd}`;
       const creditCardUrl = isMonthly
         ? `${API_BASE}/credit-card-sales?month=${month}&year=${year}`
         : `${API_BASE}/credit-card-sales?start=${startDate}&end=${endDate}`;
@@ -132,19 +139,15 @@ export default function Reports() {
       const personnelYear = isMonthly ? year : startDate.split('-')[0];
 
       const auth = authHeaders();
+      const requestOptions = { headers: auth, signal: controller.signal };
       try {
-        const [closingsRes, expensesRes, stockRes, personnelRes, manualSalesRes] = await Promise.all([
-          fetch(closingsUrl, { headers: authHeaders() }),
-          fetch(`${API_BASE}/business-expenses`, { headers: authHeaders() }),
-          fetch(`${API_BASE}/stock-purchases`, { headers: authHeaders() }),
-          fetch(`${API_BASE}/personnel?month=${personnelMonth}&year=${personnelYear}`, { headers: authHeaders() }),
-          fetch(manualSalesUrl, { headers: authHeaders() }),
+        const [closingsRes, expensesRes, stockRes, personnelRes, creditCardRes] = await Promise.all([
+          fetch(closingsUrl, requestOptions),
+          fetch(expensesUrl, requestOptions),
+          fetch(stockUrl, requestOptions),
+          fetch(`${API_BASE}/personnel?month=${personnelMonth}&year=${personnelYear}`, requestOptions),
+          fetch(creditCardUrl, requestOptions),
         ]);
-        
-        // Fetch credit card sales separately
-        const creditCardRes = await fetch(creditCardUrl, {
-          headers: auth,
-        });
 
         if (closingsRes.status === 401) {
           throw new Error('Yetkisiz');
@@ -158,7 +161,6 @@ export default function Reports() {
         const expensesData = expensesRes.ok ? await expensesRes.json() : [];
         const stockData = stockRes.ok ? await stockRes.json() : [];
         const personnelPayload = personnelRes.ok ? await personnelRes.json() : [];
-        const manualSalesData = manualSalesRes.ok ? await manualSalesRes.json() : [];
         const creditCardData = creditCardRes.ok ? await creditCardRes.json() : [];
 
         const closingRevenue = Array.isArray(closings)
@@ -167,13 +169,13 @@ export default function Reports() {
 
         const expenses = Array.isArray(expensesData)
           ? expensesData
-              .filter((item) => item && isWithinMonth(item.expense_date, start, end))
+              .filter((item) => item && isWithinRange(item.expense_date, periodStart, periodEnd))
               .reduce((sum, item) => sum + (Number(item.amount) || 0), 0)
           : 0;
 
         const stock = Array.isArray(stockData)
           ? stockData
-              .filter((item) => item && isWithinMonth(item.purchase_date, start, end))
+              .filter((item) => item && isWithinRange(item.purchase_date, periodStart, periodEnd))
               .reduce((sum, item) => sum + (Number(item.total_price) || 0), 0)
           : 0;
 
@@ -203,15 +205,21 @@ export default function Reports() {
 
         setData({ revenue, personnel, expenses, stock, creditCard });
       } catch (err) {
+        if (err?.name === 'AbortError') {
+          return;
+        }
         console.error(err);
         setError('Veriler getirilemedi. Lütfen tekrar deneyin.');
         setData({ revenue: 0, personnel: 0, expenses: 0, stock: 0, creditCard: 0 });
       } finally {
-        setLoading(false);
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
       }
     };
 
     load();
+    return () => controller.abort();
   }, [month, year, startDate, endDate, filterType]);
 
   const totalCosts = useMemo(

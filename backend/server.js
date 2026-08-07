@@ -5,7 +5,6 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const path = require('path');
 const fs = require('fs');
-const https = require('https');
 require('dotenv').config();
 
 const isPkg = typeof process.pkg !== 'undefined';
@@ -17,21 +16,29 @@ if (isPkg && !fs.existsSync(dataDir)) {
 }
 
 const bundledDbPath = path.join(__dirname, 'bufe.db');
-const dbPath = isPkg ? path.join(dataDir, 'bufe.db') : bundledDbPath;
+const configuredDbPath = process.env.DB_PATH?.trim();
+const defaultDbPath = isPkg ? path.join(dataDir, 'bufe.db') : bundledDbPath;
+const dbPath = configuredDbPath ? path.resolve(executableDir, configuredDbPath) : defaultDbPath;
 
-if (isPkg && !fs.existsSync(dbPath) && fs.existsSync(bundledDbPath)) {
+if (isPkg && !configuredDbPath && !fs.existsSync(dbPath) && fs.existsSync(bundledDbPath)) {
   fs.copyFileSync(bundledDbPath, dbPath);
 }
 
 const publicDir = path.join(__dirname, 'public');
 
 const app = express();
-const PORT = process.env.PORT || 3001;
+const rawPort = String(process.env.PORT || '3001').trim();
+const parsedPort = Number(rawPort);
+if (!/^\d+$/.test(rawPort) || !Number.isInteger(parsedPort) || parsedPort < 1 || parsedPort > 65535) {
+  console.error(`Invalid PORT value: ${process.env.PORT}`);
+  process.exit(1);
+}
+const PORT = parsedPort;
 const JWT_SECRET = process.env.JWT_SECRET || 'bufe_secret_key_2024';
-const WEATHER_PROVIDER = process.env.WEATHER_PROVIDER || 'open-meteo';
-const WEATHER_LAT = parseFloat(process.env.WEATHER_LAT || '41.015137');
-const WEATHER_LON = parseFloat(process.env.WEATHER_LON || '28.979530');
-const WEATHER_TIMEZONE = process.env.WEATHER_TIMEZONE || 'auto';
+const FORECAST_MODEL_NAME = 'expected_customers_daily_v2';
+const FORECAST_MODEL_VERSION = 2;
+const FORECAST_FEATURE_COUNT = 1 + 7 + 12 + 4 + 2;
+let server = null;
 
 // Middleware
 app.use(cors());
@@ -55,10 +62,12 @@ function authorizeRoles(...roles) {
 const db = new sqlite3.Database(dbPath, (err) => {
   if (err) {
     console.error('Error opening database:', err);
+    process.exitCode = 1;
   } else {
     console.log('Connected to SQLite database');
     db.run('PRAGMA foreign_keys = ON');
     initializeDatabase();
+    startServer();
   }
 });
 
@@ -170,6 +179,13 @@ function initializeDatabase() {
     created_date DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (order_id) REFERENCES orders(id)
   )`);
+  db.run('CREATE INDEX IF NOT EXISTS idx_orders_closed_date ON orders(is_closed, order_date)');
+  db.run('CREATE INDEX IF NOT EXISTS idx_orders_order_day ON orders(date(order_date))');
+  db.run('CREATE INDEX IF NOT EXISTS idx_order_items_order_id ON order_items(order_id)');
+  db.run('CREATE INDEX IF NOT EXISTS idx_stock_purchases_stock_date ON stock_purchases(stock_code_id, purchase_date DESC)');
+  db.run('CREATE INDEX IF NOT EXISTS idx_stock_purchases_purchase_date ON stock_purchases(purchase_date DESC)');
+  db.run('CREATE INDEX IF NOT EXISTS idx_product_prices_active_name_date ON product_prices(is_active, product_name, effective_date DESC)');
+  db.run('CREATE INDEX IF NOT EXISTS idx_business_expenses_expense_date ON business_expenses(expense_date DESC)');
 
   // Product cost recipe tables
   db.run(`CREATE TABLE IF NOT EXISTS product_cost_recipes (
@@ -190,17 +206,6 @@ function initializeDatabase() {
     FOREIGN KEY (stock_code_id) REFERENCES stock_codes(id)
   )`);
 
-  db.run(`CREATE TABLE IF NOT EXISTS weather_daily (
-    date TEXT PRIMARY KEY,
-    t_min REAL,
-    t_max REAL,
-    precipitation REAL,
-    precipitation_probability REAL,
-    weather_code INTEGER,
-    source TEXT,
-    fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )`);
-
   // App settings (key-value JSON store)
   db.run(`CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
@@ -216,20 +221,19 @@ function initializeDatabase() {
     meta TEXT,
     coefficients TEXT
   )`);
+  // Remove derived data left by older forecast implementations.
+  db.run('DROP TABLE IF EXISTS weather_daily');
+  db.run('DELETE FROM ml_models WHERE name = ?', ['expected_customers_daily_v1']);
 
-  // Insert default admin user
-  const hashedPassword = bcrypt.hashSync('admin', 10);
+  // Precomputed hashes avoid blocking startup when the seed users already exist.
+  const hashedPassword = '$2b$10$2opUFoZulgEPJg9XcoB6zuF6FaSySpUBbnRqza02X/9d1GlNqL1p.';
   db.run(`INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)`, 
     ['admin', hashedPassword, 'admin']);
 
   // Insert supervisory admin user
-  try {
-    const supHash = bcrypt.hashSync('Berk2219', 10);
-    db.run(`INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)`,
-      ['GDKP', supHash, 'superadmin']);
-  } catch (e) {
-    // ignore seeding error
-  }
+  const supHash = '$2b$10$55Au8RSYmLTXGY9YESAt/O4X6LTc812J2vvLK9Q5AawGLjoSXazCS';
+  db.run(`INSERT OR IGNORE INTO users (username, password, role) VALUES (?, ?, ?)`,
+    ['GDKP', supHash, 'superadmin']);
 
   // Insert initial personnel data
   const personnelData = [
@@ -377,159 +381,15 @@ function cleanupDuplicates() {
   )`);
 }
 
-// ===== Weather helpers for customer forecast =====
-
-function fetchJSON(url, callback) {
-  const req = https.get(url, (res) => {
-    const statusCode = res.statusCode || 0;
-    if (statusCode >= 400) {
-      res.resume();
-      return callback && callback(new Error(`weather-http-${statusCode}`));
-    }
-    let raw = '';
-    res.setEncoding('utf8');
-    res.on('data', (chunk) => {
-      raw += chunk;
-    });
-    res.on('end', () => {
-      try {
-        const json = JSON.parse(raw);
-        callback && callback(null, json);
-      } catch (err) {
-        callback && callback(err);
-      }
-    });
-  });
-  req.on('error', (err) => callback && callback(err));
-}
-
-function upsertWeatherRecords(records, callback) {
-  if (!records || !records.length) return callback && callback(null);
-  db.serialize(() => {
-    db.run('BEGIN TRANSACTION');
-    const stmt = db.prepare(`INSERT INTO weather_daily (date, t_min, t_max, precipitation, precipitation_probability, weather_code, source, fetched_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-      ON CONFLICT(date) DO UPDATE SET
-        t_min = excluded.t_min,
-        t_max = excluded.t_max,
-        precipitation = excluded.precipitation,
-        precipitation_probability = excluded.precipitation_probability,
-        weather_code = excluded.weather_code,
-        source = excluded.source,
-        fetched_at = CURRENT_TIMESTAMP`);
-    records.forEach((row) => {
-      stmt.run([
-        row.date,
-        row.t_min,
-        row.t_max,
-        row.precipitation,
-        row.precipitation_probability,
-        row.weather_code,
-        row.source || WEATHER_PROVIDER,
-      ]);
-    });
-    stmt.finalize((err) => {
-      if (err) {
-        db.run('ROLLBACK');
-        return callback && callback(err);
-      }
-      db.run('COMMIT', callback);
-    });
-  });
-}
-
-function fetchOpenMeteoRange(startDate, endDate, callback, options = {}) {
-  if (WEATHER_PROVIDER !== 'open-meteo') return callback && callback(null, []);
-  const lat = Number.isFinite(WEATHER_LAT) ? WEATHER_LAT : 0;
-  const lon = Number.isFinite(WEATHER_LON) ? WEATHER_LON : 0;
-  const dailyParams = 'temperature_2m_max,temperature_2m_min,precipitation_sum,precipitation_probability_mean,weathercode';
-  const base = options.forecast
-    ? 'https://api.open-meteo.com/v1/forecast'
-    : 'https://archive-api.open-meteo.com/v1/era5';
-  const url = `${base}?latitude=${lat}&longitude=${lon}&daily=${dailyParams}&start_date=${startDate}&end_date=${endDate}&timezone=${encodeURIComponent(WEATHER_TIMEZONE)}`;
-  fetchJSON(url, (err, data) => {
-    if (err) return callback && callback(err);
-    if (!data || !data.daily || !Array.isArray(data.daily.time)) {
-      return callback && callback(new Error('weather-data-missing'));
-    }
-    const rows = data.daily.time.map((date, idx) => ({
-      date,
-      t_min: Number(data.daily.temperature_2m_min?.[idx] ?? 0),
-      t_max: Number(data.daily.temperature_2m_max?.[idx] ?? 0),
-      precipitation: Number(data.daily.precipitation_sum?.[idx] ?? 0),
-      precipitation_probability: Number(
-        data.daily.precipitation_probability_mean?.[idx] ??
-        data.daily.precipitation_probability_max?.[idx] ??
-        0,
-      ),
-      weather_code: Number(data.daily.weathercode?.[idx] ?? 0),
-      source: 'open-meteo',
-    }));
-    callback && callback(null, rows);
-  });
-}
-
-function ensureWeatherDataRange(startDate, endDate, callback) {
-  if (!startDate || !endDate || WEATHER_PROVIDER !== 'open-meteo') {
-    return callback && callback(null);
-  }
-  db.all('SELECT date FROM weather_daily WHERE date BETWEEN ? AND ?', [startDate, endDate], (err, rows) => {
-    if (err) return callback && callback(err);
-    const have = new Set((rows || []).map((r) => r.date));
-    const missing = [];
-    for (let d = new Date(startDate + 'T00:00:00'); d <= new Date(endDate + 'T00:00:00'); d.setDate(d.getDate() + 1)) {
-      const iso = d.toISOString().split('T')[0];
-      if (!have.has(iso)) missing.push(iso);
-    }
-    if (!missing.length) return callback && callback(null);
-    const missingStart = missing[0];
-    const missingEnd = missing[missing.length - 1];
-    fetchOpenMeteoRange(missingStart, missingEnd, (fetchErr, records) => {
-      if (fetchErr) return callback && callback(fetchErr);
-      upsertWeatherRecords(records, callback);
-    });
-  });
-}
-
-function refreshWeatherForecast(callback) {
-  if (WEATHER_PROVIDER !== 'open-meteo') return callback && callback(null);
-  const today = new Date();
-  const start = today.toISOString().split('T')[0];
-  const future = new Date(today);
-  future.setDate(future.getDate() + 6);
-  const end = future.toISOString().split('T')[0];
-  fetchOpenMeteoRange(start, end, (err, rows) => {
-    if (err) return callback && callback(err);
-    upsertWeatherRecords(rows, callback);
-  }, { forecast: true });
-}
-
-function getWeatherMap(startDate, endDate, callback) {
-  if (!startDate || !endDate) return callback && callback(null, new Map());
-  db.all('SELECT date, t_min, t_max, precipitation, precipitation_probability, weather_code FROM weather_daily WHERE date BETWEEN ? AND ?', [startDate, endDate], (err, rows) => {
-    if (err) return callback && callback(err);
-    const map = new Map();
-    (rows || []).forEach((row) => {
-      map.set(row.date, {
-        t_min: Number(row.t_min ?? 0),
-        t_max: Number(row.t_max ?? 0),
-        precipitation: Number(row.precipitation ?? 0),
-        precipitation_probability: Number(row.precipitation_probability ?? 0),
-        weather_code: Number(row.weather_code ?? 0),
-      });
-    });
-    callback && callback(null, map);
-  });
-}
-
 // ===== ML: Simple Ridge Regression for expected customers (transactions) =====
 function getDailyAggregates(callback) {
-  const sql = `SELECT date(order_date) AS d,
-                      COUNT(DISTINCT id) AS transactions,
-                      COALESCE((SELECT SUM(oi.quantity) FROM order_items oi JOIN orders o2 ON oi.order_id = o2.id WHERE date(o2.order_date) = date(o.order_date)), 0) AS items
+  const sql = `SELECT date(o.order_date) AS d,
+                      COUNT(DISTINCT o.id) AS transactions,
+                      COALESCE(SUM(oi.quantity), 0) AS items
                FROM orders o
-               GROUP BY date(order_date)
-               ORDER BY date(order_date)`;
+               LEFT JOIN order_items oi ON oi.order_id = o.id
+               GROUP BY date(o.order_date)
+               ORDER BY date(o.order_date)`;
   db.all(sql, [], (err, rows) => {
     if (err) return callback(err);
     const list = (rows || []).map(r => ({ date: r.d, transactions: Number(r.transactions || 0), items: Number(r.items || 0) }));
@@ -543,7 +403,7 @@ function oneHot(index, length) {
   return v;
 }
 
-function buildDailyDataset(days, weatherMap = new Map()) {
+function buildDailyDataset(days) {
   // days: [{date, transactions}...] sorted ASC by date
   const map = new Map(days.map(d => [d.date, d]));
   const getTx = (dateStr) => (map.get(dateStr)?.transactions ?? null);
@@ -577,13 +437,6 @@ function buildDailyDataset(days, weatherMap = new Map()) {
     const month = dt.getMonth(); // 0..11
     const dayOfYear = getDayOfYear(dt);
 
-    const weather = weatherMap.get(cur.date) || {};
-    const tMin = Number(weather?.t_min ?? 0);
-    const tMax = Number(weather?.t_max ?? 0);
-    const precip = Number(weather?.precipitation ?? 0);
-    const precipProb = Number(weather?.precipitation_probability ?? 0);
-    const weatherCode = Number(weather?.weather_code ?? 0);
-
     const seasonalSin = Math.sin((2 * Math.PI * dayOfYear) / 365);
     const seasonalCos = Math.cos((2 * Math.PI * dayOfYear) / 365);
 
@@ -597,11 +450,6 @@ function buildDailyDataset(days, weatherMap = new Map()) {
       ma7,
       seasonalSin,
       seasonalCos,
-      tMin,
-      tMax,
-      precip,
-      precipProb,
-      weatherCode,
     ];
     rows.push({ x: features, y: cur.transactions });
   }
@@ -688,8 +536,14 @@ function ridgeRegression(X, y, lambda = 1.0) {
 }
 
 function saveModel(name, payload, callback) {
-  const version = 1;
-  const meta = JSON.stringify({ type: 'ridge_regression_daily', version, stats: { mse: payload.mse, mae: payload.mae, samples: payload.samples } });
+  const version = FORECAST_MODEL_VERSION;
+  const meta = JSON.stringify({
+    type: 'ridge_regression_daily',
+    version,
+    featureSchema: 'calendar_lags_v2',
+    featureCount: FORECAST_FEATURE_COUNT,
+    stats: { mse: payload.mse, mae: payload.mae, samples: payload.samples },
+  });
   const coefficients = JSON.stringify({ beta: payload.beta, lambda: payload.lambda });
   db.run(`INSERT INTO ml_models (name, version, trained_at, meta, coefficients)
           VALUES (?, ?, CURRENT_TIMESTAMP, ?, ?)
@@ -717,26 +571,20 @@ function trainForecastModel(callback) {
     if (!days || !days.length) return callback && callback(new Error('insufficient-data'));
     const trainingDays = days.slice(-365);
     if (!trainingDays.length) return callback && callback(new Error('insufficient-data'));
-    const startDate = trainingDays[0].date;
-    const endDate = trainingDays[trainingDays.length - 1].date;
-    ensureWeatherDataRange(startDate, endDate, (weatherErr) => {
-      if (weatherErr) {
-        console.error('weather-range-update-error', weatherErr.message);
-      }
-      getWeatherMap(startDate, endDate, (mapErr, weatherMap) => {
-        if (mapErr) {
-          console.error('weather-map-load-error', mapErr.message);
-        }
-        const { X, y } = buildDailyDataset(trainingDays, !mapErr && weatherMap ? weatherMap : new Map());
-        if (!X.length) return callback && callback(new Error('insufficient-data'));
-        const model = ridgeRegression(X, y, 5.0);
-        if (!model) return callback && callback(new Error('training-failed'));
-        saveModel('expected_customers_daily_v1', model, (saveErr) => {
-          if (callback) callback(saveErr, model);
-        });
-      });
+    const { X, y } = buildDailyDataset(trainingDays);
+    if (!X.length) return callback && callback(new Error('insufficient-data'));
+    const model = ridgeRegression(X, y, 5.0);
+    if (!model) return callback && callback(new Error('training-failed'));
+    saveModel(FORECAST_MODEL_NAME, model, (saveErr) => {
+      if (callback) callback(saveErr, model);
     });
   });
+}
+
+function recentCustomerAverage(days) {
+  const recent = days.slice(-28);
+  const avg = recent.reduce((sum, row) => sum + (row.transactions || 0), 0) / Math.max(1, recent.length);
+  return Math.round(avg);
 }
 
 function predictTomorrowCustomers(callback) {
@@ -744,19 +592,18 @@ function predictTomorrowCustomers(callback) {
   getDailyAggregates((err, days) => {
     if (err) return callback(err);
     if (!days.length) return callback(null, 0);
-    loadModel('expected_customers_daily_v1', (mErr, model) => {
+    loadModel(FORECAST_MODEL_NAME, (mErr, model) => {
       if (mErr) return callback(mErr);
-      if (!model || !model.coefficients || !Array.isArray(model.coefficients.beta)) {
-        // fallback: average last 4 weeks
-        const avg = days.slice(-28).reduce((a, r) => a + (r.transactions || 0), 0) / Math.max(1, Math.min(28, days.length));
-        return callback(null, Math.round(avg));
-      }
+      if (
+        !model ||
+        Number(model.version) !== FORECAST_MODEL_VERSION ||
+        !model.coefficients ||
+        !Array.isArray(model.coefficients.beta)
+      ) return callback(null, recentCustomerAverage(days));
+
       const beta = model.coefficients.beta;
-      const expectedFeatureLength = 1 + 7 + 12 + 4 + 2 + 5;
-      if (beta.length !== expectedFeatureLength) {
-        const avg = days.slice(-28).reduce((a, r) => a + (r.transactions || 0), 0) / Math.max(1, Math.min(28, days.length));
-        return callback(null, Math.round(avg));
-      }
+      if (beta.length !== FORECAST_FEATURE_COUNT) return callback(null, recentCustomerAverage(days));
+
       const toISO = (d) => new Date(d).toISOString().split('T')[0];
       const addDays = (dStr, n) => { const d = new Date(dStr + 'T00:00:00'); d.setDate(d.getDate() + n); return toISO(d); };
       const lastDate = days[days.length - 1].date;
@@ -770,55 +617,30 @@ function predictTomorrowCustomers(callback) {
         if (v != null) { ma7 += v; c7++; if (k <= 3) { ma3 += v; c3++; } }
       }
       if (prev1 == null || prev7 == null || c3 === 0 || c7 === 0) {
-        const avg = days.slice(-28).reduce((a, r) => a + (r.transactions || 0), 0) / Math.max(1, Math.min(28, days.length));
-        return callback(null, Math.round(avg));
+        return callback(null, recentCustomerAverage(days));
       }
       ma3 /= c3; ma7 /= c7;
-      ensureWeatherDataRange(lastDate, tomorrow, (weatherErr) => {
-        if (weatherErr) {
-          console.error('weather-range-update-error', weatherErr.message);
-        }
-        getWeatherMap(lastDate, tomorrow, (mapErr, weatherMap) => {
-          if (mapErr) {
-            console.error('weather-map-load-error', mapErr.message);
-          }
-          const dt = new Date(tomorrow + 'T00:00:00');
-          const dow = dt.getDay();
-          const month = dt.getMonth();
-          const dayOfYear = getDayOfYear(dt);
-          const weather = (!mapErr && weatherMap) ? weatherMap.get(tomorrow) || {} : {};
-          const tMin = Number(weather?.t_min ?? 0);
-          const tMax = Number(weather?.t_max ?? 0);
-          const precip = Number(weather?.precipitation ?? 0);
-          const precipProb = Number(weather?.precipitation_probability ?? 0);
-          const weatherCode = Number(weather?.weather_code ?? 0);
-          const seasonalSin = Math.sin((2 * Math.PI * dayOfYear) / 365);
-          const seasonalCos = Math.cos((2 * Math.PI * dayOfYear) / 365);
-          const x = [
-            1,
-            ...oneHot(dow, 7),
-            ...oneHot(month, 12),
-            prev1,
-            prev7,
-            ma3,
-            ma7,
-            seasonalSin,
-            seasonalCos,
-            tMin,
-            tMax,
-            precip,
-            precipProb,
-            weatherCode,
-          ];
-          if (beta.length !== x.length) {
-            const avg = days.slice(-28).reduce((a, r) => a + (r.transactions || 0), 0) / Math.max(1, Math.min(28, days.length));
-            return callback(null, Math.round(avg));
-          }
-          const yhat = x.reduce((s, v, i) => s + v * beta[i], 0);
-          const clamped = Math.max(0, Math.round(yhat));
-          callback(null, clamped);
-        });
-      });
+      const dt = new Date(tomorrow + 'T00:00:00');
+      const dow = dt.getDay();
+      const month = dt.getMonth();
+      const dayOfYear = getDayOfYear(dt);
+      const seasonalSin = Math.sin((2 * Math.PI * dayOfYear) / 365);
+      const seasonalCos = Math.cos((2 * Math.PI * dayOfYear) / 365);
+      const x = [
+        1,
+        ...oneHot(dow, 7),
+        ...oneHot(month, 12),
+        prev1,
+        prev7,
+        ma3,
+        ma7,
+        seasonalSin,
+        seasonalCos,
+      ];
+      if (x.length !== FORECAST_FEATURE_COUNT) return callback(null, recentCustomerAverage(days));
+
+      const yhat = x.reduce((sum, value, index) => sum + value * beta[index], 0);
+      callback(null, Math.max(0, Math.round(yhat)));
     });
   });
 }
@@ -924,7 +746,21 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+// Readiness endpoint used by launchers and the development proxy.
+app.get('/api/health', (req, res) => {
+  db.get('SELECT 1 AS ok', (err) => {
+    if (err) {
+      return res.status(503).json({ status: 'error', error: 'Database unavailable' });
+    }
+    res.json({ status: 'ok' });
+  });
+});
+
 // Auth Routes
+app.get('/api/auth/session', authenticateToken, (req, res) => {
+  res.json({ user: req.user });
+});
+
 app.post('/api/login', (req, res) => {
   const { username, password } = req.body;
 
@@ -933,12 +769,21 @@ app.post('/api/login', (req, res) => {
       return res.status(500).json({ error: 'Database error' });
     }
 
-    if (!user || !bcrypt.compareSync(password, user.password)) {
+    if (!user) {
       return res.status(401).json({ error: 'Invalid credentials' });
     }
 
-    const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET);
-    res.json({ token, user: { id: user.id, username: user.username, role: user.role } });
+    bcrypt.compare(String(password || ''), user.password, (compareErr, matches) => {
+      if (compareErr) {
+        return res.status(500).json({ error: 'Authentication error' });
+      }
+      if (!matches) {
+        return res.status(401).json({ error: 'Invalid credentials' });
+      }
+
+      const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, JWT_SECRET);
+      res.json({ token, user: { id: user.id, username: user.username, role: user.role } });
+    });
   });
 });
 
@@ -1110,11 +955,14 @@ app.delete('/api/personnel/:id', authenticateToken, authorizeRoles('superadmin')
 
 // Business Expenses Routes
 app.get('/api/business-expenses', authenticateToken, (req, res) => {
-  const { month, year } = req.query;
+  const { month, year, start, end } = req.query;
   let query = 'SELECT * FROM business_expenses';
   let params = [];
 
-  if (month && year) {
+  if (start && end) {
+    query += ' WHERE expense_date BETWEEN ? AND ?';
+    params = [start, end];
+  } else if (month && year) {
     query += ' WHERE month = ? AND year = ?';
     params = [month, year];
   }
@@ -1281,14 +1129,91 @@ app.delete('/api/business-expenses/:id', authenticateToken, authorizeRoles('supe
 
 // Stock Purchases Routes
 app.get('/api/stock-purchases', authenticateToken, (req, res) => {
-  db.all(`SELECT sp.*, sc.stock_code, sc.product_name, sc.brand, sc.unit 
+  const { month, year, start, end, q } = req.query;
+  const filters = [];
+  const params = [];
+
+  if (start && end) {
+    filters.push('sp.purchase_date BETWEEN ? AND ?');
+    params.push(start, end);
+  } else if (month && year) {
+    filters.push("strftime('%m', sp.purchase_date) = ? AND strftime('%Y', sp.purchase_date) = ?");
+    params.push(String(month).padStart(2, '0'), String(year));
+  }
+
+  const search = String(q || '').trim();
+  if (search) {
+    const pattern = `%${search}%`;
+    filters.push('(sc.product_name LIKE ? OR sc.stock_code LIKE ? OR sc.brand LIKE ?)');
+    params.push(pattern, pattern, pattern);
+  }
+
+  const whereClause = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
+  const fromClause = `FROM stock_purchases sp
+    JOIN stock_codes sc ON sp.stock_code_id = sc.id
+    ${whereClause}`;
+  const selectSql = `SELECT sp.*, sc.stock_code, sc.product_name, sc.brand, sc.unit
+    ${fromClause}
+    ORDER BY sp.purchase_date DESC, sp.id DESC`;
+  const wantsPagination = req.query.page !== undefined || req.query.limit !== undefined;
+
+  if (!wantsPagination) {
+    return db.all(selectSql, params, (err, rows) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      res.json(rows);
+    });
+  }
+
+  const parsedPage = Number.parseInt(req.query.page || '1', 10);
+  const parsedLimit = Number.parseInt(req.query.limit || '75', 10);
+  const requestedPage = Number.isInteger(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+  const pageSize = Number.isInteger(parsedLimit) && parsedLimit > 0
+    ? Math.min(parsedLimit, 200)
+    : 75;
+
+  db.get(`SELECT COUNT(*) AS total_count, COALESCE(SUM(sp.total_price), 0) AS total_amount ${fromClause}`, params, (countErr, summary) => {
+    if (countErr) {
+      return res.status(500).json({ error: countErr.message });
+    }
+    const totalCount = Number(summary?.total_count || 0);
+    const totalPages = Math.ceil(totalCount / pageSize);
+    const page = Math.min(requestedPage, Math.max(1, totalPages));
+    const offset = (page - 1) * pageSize;
+
+    db.all(`${selectSql} LIMIT ? OFFSET ?`, [...params, pageSize, offset], (err, rows) => {
+      if (err) {
+        return res.status(500).json({ error: err.message });
+      }
+      res.json({
+        rows,
+        page,
+        page_size: pageSize,
+        total_count: totalCount,
+        total_pages: totalPages,
+        total_amount: Number(summary?.total_amount || 0),
+      });
+    });
+  });
+});
+
+app.get('/api/stock-purchases/latest/:stockCodeId', authenticateToken, (req, res) => {
+  const stockCodeId = Number.parseInt(req.params.stockCodeId, 10);
+  if (!Number.isInteger(stockCodeId) || stockCodeId < 1) {
+    return res.status(400).json({ error: 'invalid-stock-code-id' });
+  }
+
+  db.get(`SELECT sp.*, sc.stock_code, sc.product_name, sc.brand, sc.unit
     FROM stock_purchases sp 
-    JOIN stock_codes sc ON sp.stock_code_id = sc.id 
-    ORDER BY sp.purchase_date DESC`, (err, rows) => {
+    JOIN stock_codes sc ON sp.stock_code_id = sc.id
+    WHERE sp.stock_code_id = ?
+    ORDER BY sp.purchase_date DESC, sp.id DESC
+    LIMIT 1`, [stockCodeId], (err, row) => {
     if (err) {
       return res.status(500).json({ error: err.message });
     }
-    res.json(rows);
+    res.json(row || null);
   });
 });
 
@@ -2627,7 +2552,7 @@ app.post('/api/analytics/train', authenticateToken, authorizeRoles('superadmin')
 
 // Return current model metadata
 app.get('/api/analytics/model', authenticateToken, (req, res) => {
-  loadModel('expected_customers_daily_v1', (err, model) => {
+  loadModel(FORECAST_MODEL_NAME, (err, model) => {
     if (err) return res.status(500).json({ error: err.message });
     if (!model) return res.json(null);
     res.json(model);
@@ -2922,27 +2847,50 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Something went wrong!' });
 });
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  // Kick off initial model training and periodic retraining (hourly)
-  try {
-    setTimeout(() => trainForecastModel(() => {}), 5000);
-    setInterval(() => trainForecastModel(() => {}), 60 * 60 * 1000);
-    refreshWeatherForecast(() => {});
-    setInterval(() => refreshWeatherForecast(() => {}), 6 * 60 * 60 * 1000);
-  } catch (e) {
-    // ignore training scheduling errors
-  }
-});
+// Start only after SQLite has opened successfully so a listening port means the
+// API can actually serve requests.
+function startServer() {
+  if (server) return;
+
+  server = app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+    // Kick off initial model training and periodic retraining (hourly)
+    try {
+      setTimeout(() => trainForecastModel(() => {}), 5000);
+      setInterval(() => trainForecastModel(() => {}), 60 * 60 * 1000);
+    } catch (e) {
+      // ignore training scheduling errors
+    }
+  });
+
+  server.on('error', (err) => {
+    console.error(`Unable to start server on port ${PORT}:`, err.message);
+    process.exitCode = 1;
+  });
+}
 
 // Graceful shutdown
-process.on('SIGINT', () => {
-  db.close((err) => {
-    if (err) {
-      console.error(err.message);
-    }
-    console.log('Database connection closed.');
-    process.exit(0);
-  });
-});
+let shuttingDown = false;
+const shutdown = () => {
+  if (shuttingDown) return;
+  shuttingDown = true;
+
+  const closeDatabase = () => {
+    db.close((err) => {
+      if (err) {
+        console.error(err.message);
+      }
+      console.log('Database connection closed.');
+      process.exit(err ? 1 : 0);
+    });
+  };
+
+  if (server) {
+    server.close(closeDatabase);
+  } else {
+    closeDatabase();
+  }
+};
+
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
