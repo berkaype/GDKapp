@@ -1,1 +1,0 @@
-function e(t=new Date){const n=t.getFullYear(),a=String(t.getMonth()+1).padStart(2,"0"),r=String(t.getDate()).padStart(2,"0");return`${n}-${a}-${r}`}function o(t){const[n,a,r]=String(t||"").split("-").map(Number);return!n||!a||!r?new Date(NaN):new Date(n,a-1,r)}export{o as f,e as t};
